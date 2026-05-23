@@ -1,6 +1,5 @@
 use std::io::Write;
 use byteorder::{BigEndian, WriteBytesExt};
-use crate::common::{Flow, TimeVal};
 use crate::exporter::{SendParameter, get_active_now};
 
 // IPFIX Constants
@@ -10,28 +9,28 @@ const IPFIX_SOFTFLOWD_V4_TEMPLATE_ID: u16 = 1024;
 const IPFIX_SOFTFLOWD_V6_TEMPLATE_ID: u16 = 2048;
 
 // Field IDs
-const IPFIX_sourceIPv4Address: u16 = 8;
-const IPFIX_destinationIPv4Address: u16 = 12;
-const IPFIX_sourceIPv6Address: u16 = 27;
-const IPFIX_destinationIPv6Address: u16 = 28;
-const IPFIX_octetDeltaCount: u16 = 1;
-const IPFIX_packetDeltaCount: u16 = 2;
-const IPFIX_ingressInterface: u16 = 10;
-const IPFIX_egressInterface: u16 = 14;
-const IPFIX_flowDirection: u16 = 61;
-const IPFIX_flowEndReason: u16 = 136;
-const IPFIX_sourceTransportPort: u16 = 7;
-const IPFIX_destinationTransportPort: u16 = 11;
-const IPFIX_protocolIdentifier: u16 = 4;
-const IPFIX_tcpControlBits: u16 = 6;
-const IPFIX_ipVersion: u16 = 60;
-const IPFIX_ipClassOfService: u16 = 5;
-const IPFIX_vlanId: u16 = 58;
-const IPFIX_postVlanId: u16 = 59;
-const IPFIX_sourceMacAddress: u16 = 56;
-const IPFIX_postDestinationMacAddress: u16 = 80;
-const IPFIX_flowStartMilliseconds: u16 = 152;
-const IPFIX_flowEndMilliseconds: u16 = 153;
+const IPFIX_SOURCE_IPV4_ADDRESS: u16 = 8;
+const IPFIX_DESTINATION_IPV4_ADDRESS: u16 = 12;
+const IPFIX_SOURCE_IPV6_ADDRESS: u16 = 27;
+const IPFIX_DESTINATION_IPV6_ADDRESS: u16 = 28;
+const IPFIX_OCTET_DELTA_COUNT: u16 = 1;
+const IPFIX_PACKET_DELTA_COUNT: u16 = 2;
+const IPFIX_INGRESS_INTERFACE: u16 = 10;
+const IPFIX_EGRESS_INTERFACE: u16 = 14;
+const IPFIX_FLOW_DIRECTION: u16 = 61;
+const IPFIX_FLOW_END_REASON: u16 = 136;
+const IPFIX_SOURCE_TRANSPORT_PORT: u16 = 7;
+const IPFIX_DESTINATION_TRANSPORT_PORT: u16 = 11;
+const IPFIX_PROTOCOL_IDENTIFIER: u16 = 4;
+const IPFIX_TCP_CONTROL_BITS: u16 = 6;
+const IPFIX_IP_VERSION: u16 = 60;
+const IPFIX_IP_CLASS_OF_SERVICE: u16 = 5;
+const IPFIX_VLAN_ID: u16 = 58;
+const IPFIX_POST_VLAN_ID: u16 = 59;
+const IPFIX_SOURCE_MAC_ADDRESS: u16 = 56;
+const IPFIX_POST_DESTINATION_MAC_ADDRESS: u16 = 80;
+const IPFIX_FLOW_START_MILLISECONDS: u16 = 152;
+const IPFIX_FLOW_END_MILLISECONDS: u16 = 153;
 
 static mut PKTS_UNTIL_TEMPLATE: i32 = -1;
 
@@ -44,20 +43,20 @@ fn write_templates(packet: &mut Vec<u8>) {
     packet.write_u16::<BigEndian>(14).unwrap(); // 14 fields
 
     let v4_fields = [
-        (IPFIX_sourceIPv4Address, 4),
-        (IPFIX_destinationIPv4Address, 4),
-        (IPFIX_octetDeltaCount, 4),
-        (IPFIX_packetDeltaCount, 4),
-        (IPFIX_ingressInterface, 4),
-        (IPFIX_egressInterface, 4),
-        (IPFIX_sourceTransportPort, 2),
-        (IPFIX_destinationTransportPort, 2),
-        (IPFIX_protocolIdentifier, 1),
-        (IPFIX_tcpControlBits, 1),
-        (IPFIX_ipVersion, 1),
-        (IPFIX_ipClassOfService, 1),
-        (IPFIX_flowStartMilliseconds, 8),
-        (IPFIX_flowEndMilliseconds, 8),
+        (IPFIX_SOURCE_IPV4_ADDRESS, 4),
+        (IPFIX_DESTINATION_IPV4_ADDRESS, 4),
+        (IPFIX_OCTET_DELTA_COUNT, 4),
+        (IPFIX_PACKET_DELTA_COUNT, 4),
+        (IPFIX_INGRESS_INTERFACE, 4),
+        (IPFIX_EGRESS_INTERFACE, 4),
+        (IPFIX_SOURCE_TRANSPORT_PORT, 2),
+        (IPFIX_DESTINATION_TRANSPORT_PORT, 2),
+        (IPFIX_PROTOCOL_IDENTIFIER, 1),
+        (IPFIX_TCP_CONTROL_BITS, 1),
+        (IPFIX_IP_VERSION, 1),
+        (IPFIX_IP_CLASS_OF_SERVICE, 1),
+        (IPFIX_FLOW_START_MILLISECONDS, 8),
+        (IPFIX_FLOW_END_MILLISECONDS, 8),
     ];
     for &(id, len) in &v4_fields {
         packet.write_u16::<BigEndian>(id).unwrap();
@@ -72,20 +71,20 @@ fn write_templates(packet: &mut Vec<u8>) {
     packet.write_u16::<BigEndian>(14).unwrap();
 
     let v6_fields = [
-        (IPFIX_sourceIPv6Address, 16),
-        (IPFIX_destinationIPv6Address, 16),
-        (IPFIX_octetDeltaCount, 4),
-        (IPFIX_packetDeltaCount, 4),
-        (IPFIX_ingressInterface, 4),
-        (IPFIX_egressInterface, 4),
-        (IPFIX_sourceTransportPort, 2),
-        (IPFIX_destinationTransportPort, 2),
-        (IPFIX_protocolIdentifier, 1),
-        (IPFIX_tcpControlBits, 1),
-        (IPFIX_ipVersion, 1),
-        (IPFIX_ipClassOfService, 1),
-        (IPFIX_flowStartMilliseconds, 8),
-        (IPFIX_flowEndMilliseconds, 8),
+        (IPFIX_SOURCE_IPV6_ADDRESS, 16),
+        (IPFIX_DESTINATION_IPV6_ADDRESS, 16),
+        (IPFIX_OCTET_DELTA_COUNT, 4),
+        (IPFIX_PACKET_DELTA_COUNT, 4),
+        (IPFIX_INGRESS_INTERFACE, 4),
+        (IPFIX_EGRESS_INTERFACE, 4),
+        (IPFIX_SOURCE_TRANSPORT_PORT, 2),
+        (IPFIX_DESTINATION_TRANSPORT_PORT, 2),
+        (IPFIX_PROTOCOL_IDENTIFIER, 1),
+        (IPFIX_TCP_CONTROL_BITS, 1),
+        (IPFIX_IP_VERSION, 1),
+        (IPFIX_IP_CLASS_OF_SERVICE, 1),
+        (IPFIX_FLOW_START_MILLISECONDS, 8),
+        (IPFIX_FLOW_END_MILLISECONDS, 8),
     ];
     for &(id, len) in &v6_fields {
         packet.write_u16::<BigEndian>(id).unwrap();
@@ -93,7 +92,7 @@ fn write_templates(packet: &mut Vec<u8>) {
     }
 }
 
-pub fn send_ipfix(mut sp: SendParameter) -> i32 {
+pub fn send_ipfix(sp: SendParameter) -> i32 {
     let now = get_active_now(sp.param);
     let mut packet = Vec::with_capacity(1500);
     let mut flows_in_packet = 0;

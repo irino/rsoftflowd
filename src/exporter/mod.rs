@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, UdpSocket, TcpStream};
+use std::net::{UdpSocket, TcpStream};
 use std::os::unix::io::{AsRawFd, RawFd};
 use crate::common::{Flow, FlowTrackParameters};
 

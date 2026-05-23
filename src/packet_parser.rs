@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use byteorder::{ByteOrder, BigEndian, LittleEndian};
-use crate::common::{TrackLevel, FlowKey, TimeVal};
+use crate::common::TrackLevel;
 
 // Standard Datalink Types
 pub const DLT_EN10MB: i32 = 1;

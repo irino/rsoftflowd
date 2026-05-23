@@ -1,7 +1,7 @@
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc::Sender;
 use std::thread;
-use crate::common::{FlowTracker, Flow, TimeVal};
+use crate::common::{FlowTracker, Flow};
 
 pub enum ControlCommand {
     Statistics { resp: Sender<String> },

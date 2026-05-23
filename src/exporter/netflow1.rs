@@ -1,9 +1,7 @@
-use std::io::Write;
 use byteorder::{BigEndian, WriteBytesExt};
-use crate::common::{Flow, TimeVal};
 use crate::exporter::{SendParameter, get_active_now};
 
-pub fn send_netflow_v1(mut sp: SendParameter) -> i32 {
+pub fn send_netflow_v1(sp: SendParameter) -> i32 {
     let now = get_active_now(sp.param);
     let uptime_ms = now.sub_ms(&sp.param.system_boot_time);
 

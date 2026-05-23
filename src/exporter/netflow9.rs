@@ -1,6 +1,5 @@
 use std::io::Write;
 use byteorder::{BigEndian, WriteBytesExt, ByteOrder};
-use crate::common::{Flow, TimeVal};
 use crate::exporter::{SendParameter, get_active_now};
 
 // Netflow v9 Constants
@@ -127,7 +126,7 @@ fn write_option_data(packet: &mut Vec<u8>, ifidx: u16, sample_rate: u32) {
     packet.write_u8(0).unwrap(); // Pad
 }
 
-pub fn send_netflow_v9(mut sp: SendParameter) -> i32 {
+pub fn send_netflow_v9(sp: SendParameter) -> i32 {
     let now = get_active_now(sp.param);
     let uptime_ms = now.sub_ms(&sp.param.system_boot_time);
 

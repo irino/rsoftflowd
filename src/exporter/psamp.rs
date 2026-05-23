@@ -1,13 +1,13 @@
 use std::io::Write;
 use byteorder::{BigEndian, WriteBytesExt};
 use crate::common::TimeVal;
-use crate::exporter::{NetflowTarget, get_active_now};
+use crate::exporter::NetflowTarget;
 
 const PSAMP_SOFTFLOWD_TEMPLATE_ID: u16 = 3072;
-const PSAMP_selectionSequenceId: u16 = 301;
-const PSAMP_observationTimeMicroseconds: u16 = 324;
-const PSAMP_sectionExportedOctets: u16 = 410;
-const PSAMP_dataLinkFrameSection: u16 = 315;
+const PSAMP_SELECTION_SEQUENCE_ID: u16 = 301;
+const PSAMP_OBSERVATION_TIME_MICROSECONDS: u16 = 324;
+const PSAMP_SECTION_EXPORTED_OCTETS: u16 = 410;
+const PSAMP_DATA_LINK_FRAME_SECTION: u16 = 315;
 
 static mut PKTS_UNTIL_TEMPLATE: i32 = -1;
 
@@ -20,19 +20,19 @@ fn write_psamp_template(packet: &mut Vec<u8>) {
     packet.write_u16::<BigEndian>(4).unwrap(); // 4 fields
 
     // 1. selectionSequenceId (8 bytes)
-    packet.write_u16::<BigEndian>(PSAMP_selectionSequenceId).unwrap();
+    packet.write_u16::<BigEndian>(PSAMP_SELECTION_SEQUENCE_ID).unwrap();
     packet.write_u16::<BigEndian>(8).unwrap();
 
     // 2. observationTimeMicroseconds (8 bytes)
-    packet.write_u16::<BigEndian>(PSAMP_observationTimeMicroseconds).unwrap();
+    packet.write_u16::<BigEndian>(PSAMP_OBSERVATION_TIME_MICROSECONDS).unwrap();
     packet.write_u16::<BigEndian>(8).unwrap();
 
     // 3. sectionExportedOctets (2 bytes)
-    packet.write_u16::<BigEndian>(PSAMP_sectionExportedOctets).unwrap();
+    packet.write_u16::<BigEndian>(PSAMP_SECTION_EXPORTED_OCTETS).unwrap();
     packet.write_u16::<BigEndian>(2).unwrap();
 
     // 4. dataLinkFrameSection (variable size in template: e.g. 120 bytes max or similar. In C, it is 1400 - headers = 1374 bytes)
-    packet.write_u16::<BigEndian>(PSAMP_dataLinkFrameSection).unwrap();
+    packet.write_u16::<BigEndian>(PSAMP_DATA_LINK_FRAME_SECTION).unwrap();
     packet.write_u16::<BigEndian>(128).unwrap(); // Fixed frame capture length in template
 }
 
