@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use byteorder::{ByteOrder, BigEndian, LittleEndian};
-use crate::common::TrackLevel;
+use crate::common::{TrackLevel, TimeVal};
 
 // Standard Datalink Types
 pub const DLT_EN10MB: i32 = 1;
@@ -39,6 +39,7 @@ pub struct ParsedPacket {
     pub is_first: bool,
     pub ip6_flowlabel: u32,
     pub length: u32,
+    pub timestamp: TimeVal,
 }
 
 pub fn parse_packet(
@@ -47,6 +48,7 @@ pub fn parse_packet(
     caplen: u32,
     orig_len: u32,
     track_level: TrackLevel,
+    timestamp: TimeVal,
 ) -> Option<ParsedPacket> {
     let caplen = caplen as usize;
     let orig_len = orig_len as usize;
@@ -330,5 +332,6 @@ pub fn parse_packet(
         is_first,
         ip6_flowlabel,
         length: orig_len.saturating_sub(offset) as u32,
+        timestamp,
     })
 }

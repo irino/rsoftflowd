@@ -1,19 +1,18 @@
-use std::net::{IpAddr, SocketAddr, UdpSocket, TcpStream, ToSocketAddrs};
-use std::path::Path;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::net::{IpAddr, UdpSocket, TcpStream, ToSocketAddrs};
+use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant};
 use clap::Parser;
 use nix::sys::signal::{self, SigAction, SigHandler, Signal};
-use crate::common::{
-    FlowTracker, Flow, FlowKey, TimeVal, ExpiryReason, ExpiryKey, TrackLevel, Statistic
+use rsoftflowd::common::{
+    FlowTracker, Flow, FlowKey, TimeVal, ExpiryReason, ExpiryKey, TrackLevel
 };
-use crate::packet_parser::{parse_packet, ParsedPacket};
-use crate::exporter::{Destination, ExportSocket, NetflowTarget, SendParameter, send_flows, get_active_now};
-use crate::control::{ControlCommand, start_control_server, render_statistics, render_dump_flows, format_flow};
+use rsoftflowd::packet_parser::{parse_packet, ParsedPacket};
+use rsoftflowd::exporter::{Destination, ExportSocket, NetflowTarget, SendParameter, send_flows};
+use rsoftflowd::control::{ControlCommand, start_control_server, render_statistics, render_dump_flows};
 
 #[derive(Parser, Debug)]
-#[command(name = "softflowd-rs", version = "0.1.0", about = "Traffic flow monitoring daemon rewritten in Rust")]
+#[command(name = "rsoftflowd", version = "0.1.0", about = "Traffic flow monitoring daemon rewritten in Rust")]
 struct Args {
     #[arg(short = 'i', help = "Specify a network interface on which to listen")]
     interface: Option<String>,
@@ -272,8 +271,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pcap_file_mode = args.pcap_file.is_some();
     tracker.param.adjust_time = pcap_file_mode;
 
-    let mut capture = if let Some(ref file_path) = args.pcap_file {
-        pcap::Capture::from_file(file_path)?
+    // Start background packet receiver thread to read from PCAP
+    let (packet_tx, packet_rx) = channel::<ParsedPacket>();
+    let bpf_filter = if !args.bpf_expression.is_empty() {
+        Some(args.bpf_expression.join(" "))
+    } else {
+        None
+    };
+
+    if let Some(ref file_path) = args.pcap_file {
+        let mut capture = pcap::Capture::from_file(file_path)?;
+        if let Some(ref filter) = bpf_filter {
+            log::info!("Applying BPF filter: \"{}\"", filter);
+            capture.filter(filter, true)?;
+        }
+        let linktype = capture.get_datalink().0;
+        let packet_tx_clone = packet_tx.clone();
+        
+        thread::spawn(move || {
+            loop {
+                unsafe {
+                    if GRACEFUL_SHUTDOWN {
+                        break;
+                    }
+                }
+                match capture.next_packet() {
+                    Ok(raw_packet) => {
+                        let caplen = raw_packet.header.caplen;
+                        let len = raw_packet.header.len;
+                        let timestamp = TimeVal {
+                            tv_sec: raw_packet.header.ts.tv_sec as i64,
+                            tv_usec: raw_packet.header.ts.tv_usec as i32,
+                        };
+                        
+                        if let Some(parsed) = parse_packet(linktype, &raw_packet.data, caplen, len, track_level, timestamp) {
+                            let _ = packet_tx_clone.send(parsed);
+                        }
+                    }
+                    Err(pcap::Error::NoMorePackets) => {
+                        log::info!("End of PCAP file reached.");
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!("PCAP capture error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
     } else if let Some(ref dev_name) = args.interface {
         let snaplen = args.capture_length.unwrap_or(256) as i32;
         let mut builder = pcap::Capture::from_device(dev_name.as_str())?
@@ -281,61 +326,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .promisc(true)
             .buffer_size(1024 * 1024);
         builder = builder.immediate_mode(true);
-        builder.open()?
+        let mut capture = builder.open()?;
+        
+        if let Some(ref filter) = bpf_filter {
+            log::info!("Applying BPF filter: \"{}\"", filter);
+            capture.filter(filter, true)?;
+        }
+        let linktype = capture.get_datalink().0;
+        let packet_tx_clone = packet_tx.clone();
+
+        thread::spawn(move || {
+            loop {
+                unsafe {
+                    if GRACEFUL_SHUTDOWN {
+                        break;
+                    }
+                }
+                match capture.next_packet() {
+                    Ok(raw_packet) => {
+                        let caplen = raw_packet.header.caplen;
+                        let len = raw_packet.header.len;
+                        let timestamp = TimeVal {
+                            tv_sec: raw_packet.header.ts.tv_sec as i64,
+                            tv_usec: raw_packet.header.ts.tv_usec as i32,
+                        };
+                        
+                        if let Some(parsed) = parse_packet(linktype, &raw_packet.data, caplen, len, track_level, timestamp) {
+                            let _ = packet_tx_clone.send(parsed);
+                        }
+                    }
+                    Err(_) => {
+                        // In live capture, timeout is normal, loop again
+                        continue;
+                    }
+                }
+            }
+        });
     } else {
         log::error!("Must specify either a live interface (-i) or offline pcap file (-r)");
         std::process::exit(1);
-    };
-
-    // Apply BPF filter if specified
-    if !args.bpf_expression.is_empty() {
-        let bpf_filter = args.bpf_expression.join(" ");
-        log::info!("Applying BPF filter: \"{}\"", bpf_filter);
-        capture.filter(&bpf_filter, true)?;
     }
 
-    // Prepare link type
-    let linktype = capture.get_datalink().0;
-
-    // Start background packet receiver thread to read from PCAP
-    let (packet_tx, packet_rx) = channel::<ParsedPacket>();
-    let is_pcap_offline = pcap_file_mode;
-    
-    // We run the capture loop in a separate thread
-    thread::spawn(move || {
-        loop {
-            unsafe {
-                if GRACEFUL_SHUTDOWN {
-                    break;
-                }
-            }
-            match capture.next_packet() {
-                Ok(raw_packet) => {
-                    let caplen = raw_packet.header.caplen;
-                    let len = raw_packet.header.len;
-                    
-                    if let Some(parsed) = parse_packet(linktype, &raw_packet.data, caplen, len, track_level) {
-                        let _ = packet_tx.send(parsed);
-                    }
-                }
-                Err(pcap::Error::NoMorePackets) => {
-                    log::info!("End of PCAP file reached.");
-                    break;
-                }
-                Err(e) => {
-                    // In live capture, timeout is normal, loop again
-                    if !is_pcap_offline {
-                        continue;
-                    }
-                    log::error!("PCAP capture error: {}", e);
-                    break;
-                }
-            }
-        }
-    });
-
     // 8. Main Event Loop
-    log::info!("softflowd-rs started. Version: {}", version);
+    log::info!("rsoftflowd started. Version: {}", version);
     let mut last_expiry_scan = Instant::now();
 
     loop {
@@ -401,12 +434,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Process incoming packet events
         let mut packets_processed_this_loop = 0;
-        while let Ok(parsed) = packet_rx.try_recv() {
-            process_parsed_packet(&mut tracker, parsed);
-            packets_processed_this_loop += 1;
-            if packets_processed_this_loop > 1000 {
-                // Return to check commands/timers
-                break;
+        let mut channel_disconnected = false;
+        loop {
+            match packet_rx.try_recv() {
+                Ok(parsed) => {
+                    process_parsed_packet(&mut tracker, parsed);
+                    packets_processed_this_loop += 1;
+                    if packets_processed_this_loop > 1000 {
+                        // Return to check commands/timers
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    channel_disconnected = true;
+                    break;
+                }
             }
         }
 
@@ -423,17 +468,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // In offline PCAP file mode, if the packet channel is empty and thread has finished, we exit!
-        if pcap_file_mode && packet_rx.is_empty() {
-            // Give pcap thread a small time to fully exit
-            thread::sleep(Duration::from_millis(100));
-            if packet_rx.is_empty() {
-                log::info!("PCAP file playback finished. Processing remaining flows.");
-                flush_all_flows(&mut tracker, &targets);
-                // Print stats to stdout before exit as C softflowd does
-                let final_stats = render_statistics(&tracker);
-                println!("{}", final_stats);
-                break;
-            }
+        if pcap_file_mode && channel_disconnected {
+            log::info!("PCAP file playback finished. Processing remaining flows.");
+            flush_all_flows(&mut tracker, &targets);
+            // Print stats to stdout before exit as C softflowd does
+            let final_stats = render_statistics(&tracker);
+            println!("{}", final_stats);
+            break;
         }
     }
 
@@ -446,20 +487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn process_parsed_packet(tracker: &mut FlowTracker, parsed: ParsedPacket) {
     if tracker.param.total_packets == 0 {
-        tracker.param.system_boot_time = TimeVal {
-            tv_sec: parsed.tos as i64, // just initializing boot time
-            tv_usec: 0,
-        };
-        // Setup actual boot time
-        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            Ok(d) => {
-                tracker.param.system_boot_time = TimeVal {
-                    tv_sec: d.as_secs() as i64,
-                    tv_usec: d.subsec_micros() as i32,
-                };
-            }
-            Err(_) => {}
-        }
+        tracker.param.system_boot_time = parsed.timestamp;
     }
 
     // Sampling
@@ -472,19 +500,7 @@ fn process_parsed_packet(tracker: &mut FlowTracker, parsed: ParsedPacket) {
 
     tracker.param.total_packets += 1;
 
-    let timeval_packet = TimeVal {
-        tv_sec: parsed.length as i64, // Use parsed.length for timing or actual timestamp
-        tv_usec: 0,
-    };
-    // Wait, let's map standard time
-    let timeval_packet = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => TimeVal {
-            tv_sec: d.as_secs() as i64,
-            tv_usec: d.subsec_micros() as i32,
-        },
-        Err(_) => TimeVal::zero(),
-    };
-    
+    let timeval_packet = parsed.timestamp;
     tracker.param.last_packet_time = timeval_packet;
 
     // Fragment packets count
@@ -538,7 +554,7 @@ fn process_parsed_packet(tracker: &mut FlowTracker, parsed: ParsedPacket) {
         flow.ip6_flowlabel[ndx] = parsed.ip6_flowlabel;
 
         // Set expiry
-        update_flow_expiry(tracker, &mut flow);
+        update_flow_expiry(&mut tracker.expiries, &tracker.param, &mut flow);
         tracker.flows.insert(key, flow);
     } else {
         let flow = tracker.flows.get_mut(&key).unwrap();
@@ -549,16 +565,20 @@ fn process_parsed_packet(tracker: &mut FlowTracker, parsed: ParsedPacket) {
         flow.flow_last = timeval_packet;
 
         // Update expiry
-        update_flow_expiry(tracker, flow);
+        update_flow_expiry(&mut tracker.expiries, &tracker.param, flow);
     }
 }
 
-fn update_flow_expiry(tracker: &mut FlowTracker, flow: &mut Flow) {
+fn update_flow_expiry(
+    expiries: &mut std::collections::BTreeMap<ExpiryKey, FlowKey>,
+    param: &rsoftflowd::common::FlowTrackParameters,
+    flow: &mut Flow,
+) {
     if let Some(old_expiry) = flow.expiry_key {
-        tracker.expiries.remove(&old_expiry);
+        expiries.remove(&old_expiry);
     }
 
-    let mut expires_at = flow.flow_last.tv_sec as u32 + tracker.param.general_timeout as u32;
+    let mut expires_at = flow.flow_last.tv_sec as u32 + param.general_timeout as u32;
     let mut reason = ExpiryReason::General;
 
     // Standard flow expiry logic
@@ -566,7 +586,7 @@ fn update_flow_expiry(tracker: &mut FlowTracker, flow: &mut Flow) {
         expires_at = 0; // immediate
         reason = ExpiryReason::OverBytes;
         flow.flow_end_reason = 2; // Lack of resources / overbytes
-    } else if tracker.param.maximum_lifetime != 0 && (flow.flow_last.tv_sec - flow.flow_start.tv_sec) as i32 >= tracker.param.maximum_lifetime {
+    } else if param.maximum_lifetime != 0 && (flow.flow_last.tv_sec - flow.flow_start.tv_sec) as i32 >= param.maximum_lifetime {
         expires_at = 0;
         reason = ExpiryReason::MaxLife;
         flow.flow_end_reason = 1; // Active timeout
@@ -575,31 +595,31 @@ fn update_flow_expiry(tracker: &mut FlowTracker, flow: &mut Flow) {
         let rst = (flow.tcp_flags[0] & 0x04) != 0 || (flow.tcp_flags[1] & 0x04) != 0;
         let fin = ((flow.tcp_flags[0] & 0x01) != 0) && ((flow.tcp_flags[1] & 0x01) != 0);
 
-        if rst && tracker.param.tcp_rst_timeout > 0 {
-            expires_at = flow.flow_last.tv_sec as u32 + tracker.param.tcp_rst_timeout as u32;
+        if rst && param.tcp_rst_timeout > 0 {
+            expires_at = flow.flow_last.tv_sec as u32 + param.tcp_rst_timeout as u32;
             reason = ExpiryReason::TcpRst;
             flow.flow_end_reason = 3; // End of flow
-        } else if fin && tracker.param.tcp_fin_timeout > 0 {
-            expires_at = flow.flow_last.tv_sec as u32 + tracker.param.tcp_fin_timeout as u32;
+        } else if fin && param.tcp_fin_timeout > 0 {
+            expires_at = flow.flow_last.tv_sec as u32 + param.tcp_fin_timeout as u32;
             reason = ExpiryReason::TcpFin;
             flow.flow_end_reason = 3;
-        } else if tracker.param.tcp_timeout > 0 {
-            expires_at = flow.flow_last.tv_sec as u32 + tracker.param.tcp_timeout as u32;
+        } else if param.tcp_timeout > 0 {
+            expires_at = flow.flow_last.tv_sec as u32 + param.tcp_timeout as u32;
             reason = ExpiryReason::Tcp;
             flow.flow_end_reason = 4; // Idle timeout
         }
-    } else if flow.key.protocol == 17 && tracker.param.udp_timeout > 0 {
-        expires_at = flow.flow_last.tv_sec as u32 + tracker.param.udp_timeout as u32;
+    } else if flow.key.protocol == 17 && param.udp_timeout > 0 {
+        expires_at = flow.flow_last.tv_sec as u32 + param.udp_timeout as u32;
         reason = ExpiryReason::Udp;
         flow.flow_end_reason = 4;
-    } else if (flow.key.protocol == 1 || flow.key.protocol == 58) && tracker.param.icmp_timeout > 0 {
-        expires_at = flow.flow_last.tv_sec as u32 + tracker.param.icmp_timeout as u32;
+    } else if (flow.key.protocol == 1 || flow.key.protocol == 58) && param.icmp_timeout > 0 {
+        expires_at = flow.flow_last.tv_sec as u32 + param.icmp_timeout as u32;
         reason = ExpiryReason::Icmp;
         flow.flow_end_reason = 4;
     }
 
-    if tracker.param.maximum_lifetime != 0 && expires_at != 0 {
-        let max_expiry = flow.flow_start.tv_sec as u32 + tracker.param.maximum_lifetime as u32;
+    if param.maximum_lifetime != 0 && expires_at != 0 {
+        let max_expiry = flow.flow_start.tv_sec as u32 + param.maximum_lifetime as u32;
         expires_at = expires_at.min(max_expiry);
     }
 
@@ -607,7 +627,7 @@ fn update_flow_expiry(tracker: &mut FlowTracker, flow: &mut Flow) {
     flow.expiry_key = Some(new_expiry);
     flow.expiry_reason = reason;
 
-    tracker.expiries.insert(new_expiry, flow.key.clone());
+    expiries.insert(new_expiry, flow.key.clone());
 }
 
 fn evict_oldest_flow(tracker: &mut FlowTracker) {
