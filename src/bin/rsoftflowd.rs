@@ -7,70 +7,10 @@ use nix::sys::signal::{self, SigAction, SigHandler, Signal};
 use rsoftflowd::common::{
     FlowTracker, Flow, FlowKey, TimeVal, ExpiryReason, ExpiryKey, TrackLevel
 };
+use rsoftflowd::opts::RsoftflowdArgs;
 use rsoftflowd::packet_parser::{parse_packet, ParsedPacket};
 use rsoftflowd::exporter::{Destination, ExportSocket, NetflowTarget, SendParameter, send_flows};
 use rsoftflowd::control::{ControlCommand, start_control_server, render_statistics, render_dump_flows};
-
-#[derive(Parser, Debug)]
-#[command(name = "rsoftflowd", version = "0.1.0", about = "Traffic flow monitoring daemon rewritten in Rust")]
-struct Args {
-    #[arg(short = 'i', help = "Specify a network interface on which to listen")]
-    interface: Option<String>,
-
-    #[arg(short = 'r', help = "Specify a pcap packet capture file to read from")]
-    pcap_file: Option<String>,
-
-    #[arg(short = 'p', default_value = "/var/run/softflowd.pid", help = "Specify PID file location")]
-    pidfile: String,
-
-    #[arg(short = 'c', default_value = "/var/run/softflowd.ctl", help = "Specify control socket path")]
-    ctlsock: String,
-
-    #[arg(short = 'm', default_value_t = 8192, help = "Specify max flows to track concurrently")]
-    max_flows: u32,
-
-    #[arg(short = 't', action = clap::ArgAction::Append, help = "Set timeout (timeout_name=time) e.g., tcp=3600")]
-    timeouts: Vec<String>,
-
-    #[arg(short = 'd', help = "Do not fork and daemonise")]
-    dont_fork: bool,
-
-    #[arg(short = 'D', help = "Debug mode (implies -d and verbose logging)")]
-    debug: bool,
-
-    #[arg(short = 'v', default_value = "5", help = "Netflow export version (1, 5, 9, 10)")]
-    netflow_version: String,
-
-    #[arg(short = 'n', help = "Specify collector address (host:port) or comma-separated list")]
-    collector: Option<String>,
-
-    #[arg(short = 'L', help = "Set the IPv4 TTL or IPv6 Hop Limit")]
-    hoplimit: Option<i32>,
-
-    #[arg(short = 'T', default_value = "full", help = "Specify flow track level (ip, proto, full, vlan, ether)")]
-    track_level: String,
-
-    #[arg(short = 'P', default_value = "udp", help = "Transport protocol for exporting (udp, tcp)")]
-    transport_protocol: String,
-
-    #[arg(short = 's', default_value_t = 0, help = "Specify periodical sampling rate")]
-    sampling_rate: u32,
-
-    #[arg(short = 'C', help = "Specify length for packet capture (snaplen)")]
-    capture_length: Option<u32>,
-
-    #[arg(short = 'S', help = "Specify send interface name (Linux only)")]
-    send_interface: Option<String>,
-
-    #[arg(short = 'e', help = "Specify exporter IP address")]
-    exporter_ip: Option<String>,
-
-    #[arg(short = 'l', help = "Load balancing mode for multiple destinations")]
-    load_balance: bool,
-
-    #[arg(trailing_var_arg = true, help = "BPF filter expression")]
-    bpf_expression: Vec<String>,
-}
 
 fn parse_duration(s: &str) -> Option<i32> {
     let mut val = 0;
@@ -147,7 +87,7 @@ fn register_signals() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let args = RsoftflowdArgs::parse();
 
     // 1. Logging setup
     let log_level = if args.debug {
@@ -161,16 +101,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Daemonize if requested
     if !args.dont_fork && !args.debug {
-        log::info!("Daemonising softflowd-rs...");
+        log::info!("Daemonising rsoftflowd...");
         if let Err(e) = nix::unistd::daemon(true, false) {
             log::error!("Failed to daemonise: {}", e);
             std::process::exit(1);
         }
     }
 
+    // Resolve PID file path
+    let pidfile_path = match args.pidfile.as_deref() {
+        Some("none") => None,
+        Some(path) => Some(path.to_string()),
+        None => {
+            if args.dont_fork || args.debug || args.pcap_file.is_some() {
+                None
+            } else {
+                Some("/var/run/softflowd.pid".to_string())
+            }
+        }
+    };
+
     // Write PID file
-    if let Err(e) = std::fs::write(&args.pidfile, format!("{}\n", std::process::id())) {
-        log::warn!("Could not write PID file {}: {}", args.pidfile, e);
+    if let Some(ref path) = pidfile_path {
+        if let Err(e) = std::fs::write(path, format!("{}\n", std::process::id())) {
+            log::warn!("Could not write PID file {}: {}", path, e);
+        }
     }
 
     // 3. Setup Flow Tracker
@@ -258,10 +213,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Start UNIX domain socket control server
     let (cmd_tx, cmd_rx) = channel::<ControlCommand>();
-    let ctl_path = args.ctlsock.clone();
-    if let Err(e) = start_control_server(ctl_path.clone(), cmd_tx) {
-        log::error!("Failed to start control server: {}", e);
-        std::process::exit(1);
+    let ctl_path = match args.ctlsock.as_deref() {
+        Some("none") => None,
+        Some(path) => Some(path.to_string()),
+        None => {
+            if args.pcap_file.is_some() {
+                None
+            } else {
+                Some("/var/run/softflowd.ctl".to_string())
+            }
+        }
+    };
+    if let Some(ref path) = ctl_path {
+        if let Err(e) = start_control_server(path.clone(), cmd_tx) {
+            log::error!("Failed to start control server: {}", e);
+            std::process::exit(1);
+        }
     }
 
     // 6. Signal integration
@@ -366,6 +333,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::error!("Must specify either a live interface (-i) or offline pcap file (-r)");
         std::process::exit(1);
     }
+
+    drop(packet_tx);
 
     // 8. Main Event Loop
     log::info!("rsoftflowd started. Version: {}", version);
@@ -478,9 +447,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Cleanup UNIX socket file
-    let _ = std::fs::remove_file(&ctl_path);
-    let _ = std::fs::remove_file(&args.pidfile);
+    // Cleanup UNIX socket file and PID file
+    if let Some(ref path) = ctl_path {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(ref path) = pidfile_path {
+        let _ = std::fs::remove_file(path);
+    }
 
     Ok(())
 }
@@ -639,6 +612,11 @@ fn evict_oldest_flow(tracker: &mut FlowTracker) {
             flow.flow_end_reason = 2; // Lack of resources
             // Accumulate statistics
             accumulate_stats(tracker, &flow);
+            log::debug!(
+                "EXPIRED: {} ({:p})",
+                rsoftflowd::control::format_flow(&flow),
+                &flow
+            );
         }
     }
 }
@@ -681,6 +659,8 @@ fn accumulate_stats(tracker: &mut FlowTracker, flow: &Flow) {
 }
 
 fn scan_expiries(tracker: &mut FlowTracker, targets: &NetflowTarget, force_all: bool) -> usize {
+    log::debug!("Starting expiry scan: mode {}", if force_all { 1 } else { 0 });
+
     let now_sec = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs() as u32,
         Err(_) => 0,
@@ -706,13 +686,29 @@ fn scan_expiries(tracker: &mut FlowTracker, targets: &NetflowTarget, force_all: 
                 flow.expiry_reason = ExpiryReason::Flush;
                 flow.flow_end_reason = 3; // End of flow
             }
+            log::debug!(
+                "Queuing flow seq:{} ({:p}) for expiry reason {:?}",
+                flow.flow_seq,
+                &flow,
+                flow.expiry_reason
+            );
             accumulate_stats(tracker, &flow);
             expired_flows.push(flow);
         }
     }
 
     let count = expired_flows.len();
+    log::debug!("Finished scan {} flow(s) to be evicted", count);
+
     if count > 0 {
+        for flow in &expired_flows {
+            log::debug!(
+                "EXPIRED: {} ({:p})",
+                rsoftflowd::control::format_flow(flow),
+                flow
+            );
+        }
+
         // Convert to array of refs
         let flow_refs: Vec<&Flow> = expired_flows.iter().collect();
         let sp = SendParameter {

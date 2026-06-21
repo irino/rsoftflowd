@@ -1,19 +1,10 @@
 use clap::Parser;
+use rsoftflowd::opts::RsoftflowctlArgs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-#[derive(Parser, Debug)]
-#[command(name = "rsoftflowctl", version = "0.1.0", about = "Control rsoftflowd daemon rewritten in Rust")]
-struct Args {
-    #[arg(short = 'c', default_value = "/var/run/softflowd.ctl", help = "Specify control socket path")]
-    ctlsock: String,
-
-    #[arg(help = "The command to send to softflowd (e.g. statistics, dump-flows, shutdown, expire-all)")]
-    command: String,
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let args = RsoftflowctlArgs::parse();
 
     let mut stream = match UnixStream::connect(&args.ctlsock) {
         Ok(s) => s,
