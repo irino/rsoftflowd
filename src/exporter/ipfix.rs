@@ -1,6 +1,5 @@
-use std::io::Write;
-use byteorder::{BigEndian, WriteBytesExt};
 use crate::exporter::{SendParameter, get_active_now};
+use std::io::Write;
 
 // IPFIX Constants
 const IPFIX_TEMPLATE_SET_ID: u16 = 2;
@@ -36,11 +35,10 @@ static mut PKTS_UNTIL_TEMPLATE: i32 = -1;
 
 fn write_templates(packet: &mut Vec<u8>) {
     // 1. IPv4 Template Flowset
-    packet.write_u16::<BigEndian>(IPFIX_TEMPLATE_SET_ID).unwrap();
-    // Flowset Length: 4 (set header) + 4 (template record header) + 14 * 4 (fields) = 64
-    packet.write_u16::<BigEndian>(64).unwrap();
-    packet.write_u16::<BigEndian>(IPFIX_SOFTFLOWD_V4_TEMPLATE_ID).unwrap();
-    packet.write_u16::<BigEndian>(14).unwrap(); // 14 fields
+    packet.extend_from_slice(&IPFIX_TEMPLATE_SET_ID.to_be_bytes());
+    packet.extend_from_slice(&64u16.to_be_bytes());
+    packet.extend_from_slice(&IPFIX_SOFTFLOWD_V4_TEMPLATE_ID.to_be_bytes());
+    packet.extend_from_slice(&14u16.to_be_bytes());
 
     let v4_fields = [
         (IPFIX_SOURCE_IPV4_ADDRESS, 4),
@@ -59,16 +57,15 @@ fn write_templates(packet: &mut Vec<u8>) {
         (IPFIX_FLOW_END_MILLISECONDS, 8),
     ];
     for &(id, len) in &v4_fields {
-        packet.write_u16::<BigEndian>(id).unwrap();
-        packet.write_u16::<BigEndian>(len).unwrap();
+        packet.extend_from_slice(&(id as u16).to_be_bytes());
+        packet.extend_from_slice(&(len as u16).to_be_bytes());
     }
 
     // 2. IPv6 Template Flowset
-    packet.write_u16::<BigEndian>(IPFIX_TEMPLATE_SET_ID).unwrap();
-    // Flowset Length: 4 + 4 + 14 * 4 = 64
-    packet.write_u16::<BigEndian>(64).unwrap();
-    packet.write_u16::<BigEndian>(IPFIX_SOFTFLOWD_V6_TEMPLATE_ID).unwrap();
-    packet.write_u16::<BigEndian>(14).unwrap();
+    packet.extend_from_slice(&IPFIX_TEMPLATE_SET_ID.to_be_bytes());
+    packet.extend_from_slice(&64u16.to_be_bytes());
+    packet.extend_from_slice(&IPFIX_SOFTFLOWD_V6_TEMPLATE_ID.to_be_bytes());
+    packet.extend_from_slice(&14u16.to_be_bytes());
 
     let v6_fields = [
         (IPFIX_SOURCE_IPV6_ADDRESS, 16),
@@ -87,8 +84,8 @@ fn write_templates(packet: &mut Vec<u8>) {
         (IPFIX_FLOW_END_MILLISECONDS, 8),
     ];
     for &(id, len) in &v6_fields {
-        packet.write_u16::<BigEndian>(id).unwrap();
-        packet.write_u16::<BigEndian>(len).unwrap();
+        packet.extend_from_slice(&(id as u16).to_be_bytes());
+        packet.extend_from_slice(&(len as u16).to_be_bytes());
     }
 }
 
@@ -115,17 +112,18 @@ pub fn send_ipfix(sp: SendParameter) -> i32 {
 
     if send_templates_now {
         packet.clear();
-        packet.write_u16::<BigEndian>(10).unwrap(); // Version (IPFIX)
-        packet.write_u16::<BigEndian>(0).unwrap(); // Length (fill later)
-        packet.write_u32::<BigEndian>(now.tv_sec as u32).unwrap();
-        packet.write_u32::<BigEndian>(sp.param.records_sent as u32).unwrap(); // Sequence
-        packet.write_u32::<BigEndian>(0).unwrap(); // Observation Domain ID
+        packet.extend_from_slice(&10u16.to_be_bytes()); // Version (IPFIX)
+        packet.extend_from_slice(&0u16.to_be_bytes()); // Length (fill later)
+        packet.extend_from_slice(&(now.tv_sec as u32).to_be_bytes());
+        packet.extend_from_slice(&(sp.param.records_sent as u32).to_be_bytes()); // Sequence
+        packet.extend_from_slice(&0u32.to_be_bytes()); // Observation Domain ID
 
         write_templates(&mut packet);
 
         let packet_len = packet.len() as u16;
-        packet[2] = (packet_len >> 8) as u8;
-        packet[3] = (packet_len & 0xFF) as u8;
+        let len_bytes = packet_len.to_be_bytes();
+        packet[2] = len_bytes[0];
+        packet[3] = len_bytes[1];
 
         let mut sent = 0;
         let _ = sp.target.send_multi_destinations(&packet, &mut sent);
@@ -162,26 +160,27 @@ pub fn send_ipfix(sp: SendParameter) -> i32 {
             }
 
             if packet.is_empty() {
-                packet.write_u16::<BigEndian>(10).unwrap(); // Version
-                packet.write_u16::<BigEndian>(0).unwrap(); // Length (fill at end)
-                packet.write_u32::<BigEndian>(now.tv_sec as u32).unwrap();
-                packet.write_u32::<BigEndian>((sp.param.records_sent + sp.param.flows_exported) as u32).unwrap();
-                packet.write_u32::<BigEndian>(0).unwrap();
+                packet.extend_from_slice(&10u16.to_be_bytes()); // Version
+                packet.extend_from_slice(&0u16.to_be_bytes()); // Length (fill at end)
+                packet.extend_from_slice(&(now.tv_sec as u32).to_be_bytes());
+                packet.extend_from_slice(&((sp.param.records_sent + sp.param.flows_exported) as u32).to_be_bytes());
+                packet.extend_from_slice(&0u32.to_be_bytes());
             }
 
             if current_template_id != flow_template_id {
                 if current_template_id != 0 {
                     // Close previous flowset
                     let flowset_len = (packet.len() - flowset_start_offset) as u16;
-                    packet[offset_to_flowset_len] = (flowset_len >> 8) as u8;
-                    packet[offset_to_flowset_len + 1] = (flowset_len & 0xFF) as u8;
+                    let len_bytes = flowset_len.to_be_bytes();
+                    packet[offset_to_flowset_len] = len_bytes[0];
+                    packet[offset_to_flowset_len + 1] = len_bytes[1];
                 }
 
                 // Start new flowset
                 flowset_start_offset = packet.len();
-                packet.write_u16::<BigEndian>(flow_template_id).unwrap();
+                packet.extend_from_slice(&flow_template_id.to_be_bytes());
                 offset_to_flowset_len = packet.len();
-                packet.write_u16::<BigEndian>(0).unwrap(); // Flowset length placeholder
+                packet.extend_from_slice(&0u16.to_be_bytes()); // Flowset length placeholder
 
                 current_template_id = flow_template_id;
             }
@@ -196,8 +195,8 @@ pub fn send_ipfix(sp: SendParameter) -> i32 {
                     std::net::IpAddr::V6(ip) => ip.octets(),
                     _ => [0; 16],
                 };
-                packet.write_all(&src_bytes).unwrap();
-                packet.write_all(&dst_bytes).unwrap();
+                packet.extend_from_slice(&src_bytes);
+                packet.extend_from_slice(&dst_bytes);
             } else {
                 let src_ip = match flow.key.addr[dir] {
                     std::net::IpAddr::V4(ip) => u32::from(ip),
@@ -207,26 +206,26 @@ pub fn send_ipfix(sp: SendParameter) -> i32 {
                     std::net::IpAddr::V4(ip) => u32::from(ip),
                     _ => 0,
                 };
-                packet.write_u32::<BigEndian>(src_ip).unwrap();
-                packet.write_u32::<BigEndian>(dst_ip).unwrap();
+                packet.extend_from_slice(&src_ip.to_be_bytes());
+                packet.extend_from_slice(&dst_ip.to_be_bytes());
             }
 
-            packet.write_u32::<BigEndian>(flow.octets[dir]).unwrap();
-            packet.write_u32::<BigEndian>(flow.packets[dir]).unwrap();
-            packet.write_u32::<BigEndian>(ifidx as u32).unwrap();
-            packet.write_u32::<BigEndian>(ifidx as u32).unwrap();
-            packet.write_u16::<BigEndian>(flow.key.port[dir].to_be()).unwrap();
-            packet.write_u16::<BigEndian>(flow.key.port[dir ^ 1].to_be()).unwrap();
-            packet.write_u8(flow.key.protocol).unwrap();
-            packet.write_u8(flow.tcp_flags[dir]).unwrap();
-            packet.write_u8(if is_v6 { 6 } else { 4 }).unwrap();
-            packet.write_u8(flow.tos[dir]).unwrap();
+            packet.extend_from_slice(&flow.octets[dir].to_be_bytes());
+            packet.extend_from_slice(&flow.packets[dir].to_be_bytes());
+            packet.extend_from_slice(&(ifidx as u32).to_be_bytes());
+            packet.extend_from_slice(&(ifidx as u32).to_be_bytes());
+            packet.extend_from_slice(&flow.key.port[dir].to_be_bytes());
+            packet.extend_from_slice(&flow.key.port[dir ^ 1].to_be_bytes());
+            packet.push(flow.key.protocol);
+            packet.push(flow.tcp_flags[dir]);
+            packet.push(if is_v6 { 6 } else { 4 });
+            packet.push(flow.tos[dir]);
 
             // Flow start and end in Milliseconds since Unix epoch (IPFIX standard)
             let start_ms = (flow.flow_start.tv_sec * 1000) as u64 + (flow.flow_start.tv_usec / 1000) as u64;
             let end_ms = (flow.flow_last.tv_sec * 1000) as u64 + (flow.flow_last.tv_usec / 1000) as u64;
-            packet.write_u64::<BigEndian>(start_ms).unwrap();
-            packet.write_u64::<BigEndian>(end_ms).unwrap();
+            packet.extend_from_slice(&start_ms.to_be_bytes());
+            packet.extend_from_slice(&end_ms.to_be_bytes());
 
             flows_in_packet += 1;
         }

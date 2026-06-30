@@ -1,5 +1,5 @@
-use byteorder::{BigEndian, WriteBytesExt};
 use crate::exporter::{SendParameter, get_active_now};
+use std::io::Write;
 
 pub fn send_netflow_v1(sp: SendParameter) -> i32 {
     let now = get_active_now(sp.param);
@@ -39,12 +39,12 @@ pub fn send_netflow_v1(sp: SendParameter) -> i32 {
             if flows_in_packet == 0 {
                 packet.clear();
                 // 1. Write Header (16 bytes)
-                packet.write_u16::<BigEndian>(1).unwrap(); // Version
+                packet.extend_from_slice(&1u16.to_be_bytes()); // Version
                 offset_to_flow_count = packet.len();
-                packet.write_u16::<BigEndian>(0).unwrap(); // Flows count
-                packet.write_u32::<BigEndian>(uptime_ms).unwrap();
-                packet.write_u32::<BigEndian>(now.tv_sec as u32).unwrap();
-                packet.write_u32::<BigEndian>((now.tv_usec * 1000) as u32).unwrap();
+                packet.extend_from_slice(&0u16.to_be_bytes()); // Flows count
+                packet.extend_from_slice(&uptime_ms.to_be_bytes());
+                packet.extend_from_slice(&(now.tv_sec as u32).to_be_bytes());
+                packet.extend_from_slice(&((now.tv_usec * 1000) as u32).to_be_bytes());
             }
 
             // 2. Write Flow Record (40 bytes)
@@ -57,29 +57,29 @@ pub fn send_netflow_v1(sp: SendParameter) -> i32 {
                 _ => 0,
             };
 
-            packet.write_u32::<BigEndian>(src_ip).unwrap();
-            packet.write_u32::<BigEndian>(dst_ip).unwrap();
-            packet.write_u32::<BigEndian>(0).unwrap(); // Nexthop IP
-            packet.write_u16::<BigEndian>(ifidx).unwrap();
-            packet.write_u16::<BigEndian>(ifidx).unwrap();
-            packet.write_u32::<BigEndian>(flow.packets[dir]).unwrap();
-            packet.write_u32::<BigEndian>(flow.octets[dir]).unwrap();
+            packet.extend_from_slice(&src_ip.to_be_bytes());
+            packet.extend_from_slice(&dst_ip.to_be_bytes());
+            packet.extend_from_slice(&0u32.to_be_bytes()); // Nexthop IP
+            packet.extend_from_slice(&ifidx.to_be_bytes());
+            packet.extend_from_slice(&ifidx.to_be_bytes());
+            packet.extend_from_slice(&flow.packets[dir].to_be_bytes());
+            packet.extend_from_slice(&flow.octets[dir].to_be_bytes());
 
             let flow_start_ms = flow.flow_start.sub_ms(&sp.param.system_boot_time);
             let flow_last_ms = flow.flow_last.sub_ms(&sp.param.system_boot_time);
-            packet.write_u32::<BigEndian>(flow_start_ms).unwrap();
-            packet.write_u32::<BigEndian>(flow_last_ms).unwrap();
+            packet.extend_from_slice(&flow_start_ms.to_be_bytes());
+            packet.extend_from_slice(&flow_last_ms.to_be_bytes());
 
-            packet.write_u16::<BigEndian>(flow.key.port[dir].to_be()).unwrap();
-            packet.write_u16::<BigEndian>(flow.key.port[dir ^ 1].to_be()).unwrap();
-            packet.write_u16::<BigEndian>(0).unwrap(); // Pad
-            packet.write_u8(flow.key.protocol).unwrap();
-            packet.write_u8(flow.tos[dir]).unwrap();
-            packet.write_u8(flow.tcp_flags[dir]).unwrap();
-            packet.write_u8(0).unwrap(); // Pad2
-            packet.write_u8(0).unwrap(); // Pad3
-            packet.write_u8(0).unwrap(); // Pad4
-            packet.write_u32::<BigEndian>(0).unwrap(); // Reserved
+            packet.extend_from_slice(&flow.key.port[dir].to_be_bytes());
+            packet.extend_from_slice(&flow.key.port[dir ^ 1].to_be_bytes());
+            packet.extend_from_slice(&0u16.to_be_bytes()); // Pad
+            packet.push(flow.key.protocol);
+            packet.push(flow.tos[dir]);
+            packet.push(flow.tcp_flags[dir]);
+            packet.push(0); // Pad2
+            packet.push(0); // Pad3
+            packet.push(0); // Pad4
+            packet.extend_from_slice(&0u32.to_be_bytes()); // Reserved
 
             flows_in_packet += 1;
         }
@@ -107,8 +107,9 @@ fn send_packet(
     offset_to_flow_count: usize,
     flows_count: u16,
 ) -> std::io::Result<()> {
-    packet[offset_to_flow_count] = (flows_count >> 8) as u8;
-    packet[offset_to_flow_count + 1] = (flows_count & 0xFF) as u8;
+    let count_bytes = flows_count.to_be_bytes();
+    packet[offset_to_flow_count] = count_bytes[0];
+    packet[offset_to_flow_count + 1] = count_bytes[1];
 
     let mut sent = 0;
     sp.target.send_multi_destinations(packet, &mut sent)

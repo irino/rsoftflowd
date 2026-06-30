@@ -75,9 +75,9 @@ pub fn parse_packet(
                 if caplen < offset + 4 {
                     return None;
                 }
-                let tci = BigEndian::read_u16(&pkt[offset..offset+2]);
+                let tci = u16::from_be_bytes([pkt[offset], pkt[offset+1]]);
                 vlan_id = tci & 0x0FFF;
-                ethertype = BigEndian::read_u16(&pkt[offset+2..offset+4]);
+                ethertype = u16::from_be_bytes([pkt[offset+2], pkt[offset+3]]);
                 offset += 4;
             }
 
@@ -87,7 +87,7 @@ pub fn parse_packet(
                     if caplen < offset + 4 {
                         return None;
                     }
-                    let shim = BigEndian::read_u32(&pkt[offset..offset+4]);
+                    let shim = u32::from_be_bytes([pkt[offset], pkt[offset+1], pkt[offset+2], pkt[offset+3]]);
                     mpls_labels.push(shim);
                     offset += 4;
                     // Check Bottom of Stack bit (bit 8 from right, shifted by 8)
@@ -135,14 +135,10 @@ pub fn parse_packet(
             }
             let family = if linktype == DLT_NULL {
                 // Null loopback is local host byte order
-                if cfg!(target_endian = "big") {
-                    BigEndian::read_u32(&pkt[0..4])
-                } else {
-                    LittleEndian::read_u32(&pkt[0..4])
-                }
+                u32::from_ne_bytes([pkt[0], pkt[1], pkt[2], pkt[3]])
             } else {
                 // Loop is always big endian
-                BigEndian::read_u32(&pkt[0..4])
+                u32::from_be_bytes([pkt[0], pkt[1], pkt[2], pkt[3]])
             };
             // Map family to AF
             if family == 2 {
@@ -159,7 +155,7 @@ pub fn parse_packet(
             if caplen < 16 {
                 return None;
             }
-            let protocol = BigEndian::read_u16(&pkt[14..16]);
+            let protocol = u16::from_be_bytes([pkt[14], pkt[15]]);
             offset = 16;
             if protocol == 0x0800 {
                 af = 2;
@@ -207,7 +203,7 @@ pub fn parse_packet(
         src_ip = IpAddr::V4(Ipv4Addr::new(ip_src_bytes[0], ip_src_bytes[1], ip_src_bytes[2], ip_src_bytes[3]));
         dst_ip = IpAddr::V4(Ipv4Addr::new(ip_dst_bytes[0], ip_dst_bytes[1], ip_dst_bytes[2], ip_dst_bytes[3]));
 
-        let frag_field = BigEndian::read_u16(&pkt[offset + 6..offset + 8]);
+        let frag_field = u16::from_be_bytes([pkt[offset + 6], pkt[offset + 7]]);
         let frag_offset = frag_field & 0x1FFF;
         let more_frags = (frag_field & 0x2000) != 0;
 
@@ -225,7 +221,7 @@ pub fn parse_packet(
             return None;
         }
 
-        let flow_field = BigEndian::read_u32(&pkt[offset..offset + 4]);
+        let flow_field = u32::from_be_bytes([pkt[offset], pkt[offset + 1], pkt[offset + 2], pkt[offset + 3]]);
         tos = ((flow_field & 0x0FF00000) >> 20) as u8;
         ip6_flowlabel = flow_field & 0x000FFFFF;
 
@@ -257,7 +253,7 @@ pub fn parse_packet(
                     break;
                 }
                 is_frag = true;
-                let frag_offlg = BigEndian::read_u16(&pkt[next_header_offset + 2..next_header_offset + 4]);
+                let frag_offlg = u16::from_be_bytes([pkt[next_header_offset + 2], pkt[next_header_offset + 3]]);
                 let frag_offset = frag_offlg & 0xFFF8;
                 if frag_offset != 0 {
                     is_first = false;
@@ -283,15 +279,15 @@ pub fn parse_packet(
         match protocol {
             IPPROTO_TCP => {
                 if remain >= 20 {
-                    src_port = BigEndian::read_u16(&pkt[next_header_offset..next_header_offset + 2]);
-                    dst_port = BigEndian::read_u16(&pkt[next_header_offset + 2..next_header_offset + 4]);
+                    src_port = u16::from_be_bytes([pkt[next_header_offset], pkt[next_header_offset + 1]]);
+                    dst_port = u16::from_be_bytes([pkt[next_header_offset + 2], pkt[next_header_offset + 3]]);
                     tcp_flags = pkt[next_header_offset + 13];
                 }
             }
             IPPROTO_UDP => {
                 if remain >= 8 {
-                    src_port = BigEndian::read_u16(&pkt[next_header_offset..next_header_offset + 2]);
-                    dst_port = BigEndian::read_u16(&pkt[next_header_offset + 2..next_header_offset + 4]);
+                    src_port = u16::from_be_bytes([pkt[next_header_offset], pkt[next_header_offset + 1]]);
+                    dst_port = u16::from_be_bytes([pkt[next_header_offset + 2], pkt[next_header_offset + 3]]);
                 }
             }
             IPPROTO_ICMP => {
@@ -300,7 +296,7 @@ pub fn parse_packet(
                     let icmp_code = pkt[next_header_offset + 1] as u16;
                     src_port = 0;
                     // Encode ICMP type * 256 + code like Cisco
-                    dst_port = (icmp_type * 256 + icmp_code).to_be();
+                    dst_port = icmp_type << 8 | icmp_code;
                 }
             }
             IPPROTO_ICMPV6 => {
@@ -308,7 +304,7 @@ pub fn parse_packet(
                     let icmp_type = pkt[next_header_offset] as u16;
                     let icmp_code = pkt[next_header_offset + 1] as u16;
                     src_port = 0;
-                    dst_port = (icmp_type * 256 + icmp_code).to_be();
+                    dst_port = icmp_type << 8 | icmp_code;
                 }
             }
             _ => {}

@@ -38,10 +38,10 @@ static mut PKTS_UNTIL_TEMPLATE: i32 = -1;
 
 fn write_templates(packet: &mut Vec<u8>) {
     // 1. Write IPv4 Template (flowset_id=0, length=4+4+16*4 = 72)
-    packet.write_u16::<BigEndian>(NF9_TEMPLATE_SET_ID).unwrap();
-    packet.write_u16::<BigEndian>(72).unwrap(); // Total template flowset length
-    packet.write_u16::<BigEndian>(NF9_SOFTFLOWD_V4_TEMPLATE_ID).unwrap();
-    packet.write_u16::<BigEndian>(16).unwrap(); // Fields count
+    packet.extend_from_slice(&NF9_TEMPLATE_SET_ID.to_be_bytes());
+    packet.extend_from_slice(&72u16.to_be_bytes()); // Total template flowset length
+    packet.extend_from_slice(&NF9_SOFTFLOWD_V4_TEMPLATE_ID.to_be_bytes());
+    packet.extend_from_slice(&16u16.to_be_bytes()); // Fields count
 
     let v4_fields = [
         (NF9_IPV4_SRC_ADDR, 4),
@@ -62,15 +62,15 @@ fn write_templates(packet: &mut Vec<u8>) {
         (NF9_SRC_VLAN, 2),
     ];
     for &(t, l) in &v4_fields {
-        packet.write_u16::<BigEndian>(t).unwrap();
-        packet.write_u16::<BigEndian>(l).unwrap();
+        packet.extend_from_slice(&(t as u16).to_be_bytes());
+        packet.extend_from_slice(&(l as u16).to_be_bytes());
     }
 
     // 2. Write IPv6 Template (flowset_id=0, length=4+4+16*4 = 72)
-    packet.write_u16::<BigEndian>(NF9_TEMPLATE_SET_ID).unwrap();
-    packet.write_u16::<BigEndian>(72).unwrap();
-    packet.write_u16::<BigEndian>(NF9_SOFTFLOWD_V6_TEMPLATE_ID).unwrap();
-    packet.write_u16::<BigEndian>(16).unwrap();
+    packet.extend_from_slice(&NF9_TEMPLATE_SET_ID.to_be_bytes());
+    packet.extend_from_slice(&72u16.to_be_bytes());
+    packet.extend_from_slice(&NF9_SOFTFLOWD_V6_TEMPLATE_ID.to_be_bytes());
+    packet.extend_from_slice(&16u16.to_be_bytes());
 
     let v6_fields = [
         (NF9_IPV6_SRC_ADDR, 16),
@@ -91,39 +91,39 @@ fn write_templates(packet: &mut Vec<u8>) {
         (NF9_SRC_VLAN, 2),
     ];
     for &(t, l) in &v6_fields {
-        packet.write_u16::<BigEndian>(t).unwrap();
-        packet.write_u16::<BigEndian>(l).unwrap();
+        packet.extend_from_slice(&(t as u16).to_be_bytes());
+        packet.extend_from_slice(&(l as u16).to_be_bytes());
     }
 
     // 3. Write Options Template (flowset_id=1, length=4+4+4+4+2*4 = 24)
-    packet.write_u16::<BigEndian>(NF9_OPTION_TEMPLATE_SET_ID).unwrap();
-    packet.write_u16::<BigEndian>(24).unwrap();
-    packet.write_u16::<BigEndian>(NF9_SOFTFLOWD_OPTION_TEMPLATE_ID).unwrap();
-    packet.write_u16::<BigEndian>(4).unwrap(); // Scope length in bytes
-    packet.write_u16::<BigEndian>(8).unwrap(); // Options length in bytes
+    packet.extend_from_slice(&NF9_OPTION_TEMPLATE_SET_ID.to_be_bytes());
+    packet.extend_from_slice(&24u16.to_be_bytes());
+    packet.extend_from_slice(&NF9_SOFTFLOWD_OPTION_TEMPLATE_ID.to_be_bytes());
+    packet.extend_from_slice(&4u16.to_be_bytes()); // Scope length in bytes
+    packet.extend_from_slice(&8u16.to_be_bytes()); // Options length in bytes
     // Scope field (Interface Index)
-    packet.write_u16::<BigEndian>(NFLOW9_OPTION_SCOPE_INTERFACE).unwrap();
-    packet.write_u16::<BigEndian>(4).unwrap();
+    packet.extend_from_slice(&NFLOW9_OPTION_SCOPE_INTERFACE.to_be_bytes());
+    packet.extend_from_slice(&4u16.to_be_bytes());
     // Option fields
-    packet.write_u16::<BigEndian>(NFLOW9_SAMPLING_INTERVAL).unwrap();
-    packet.write_u16::<BigEndian>(4).unwrap();
-    packet.write_u16::<BigEndian>(NFLOW9_SAMPLING_ALGORITHM).unwrap();
-    packet.write_u16::<BigEndian>(1).unwrap();
+    packet.extend_from_slice(&NFLOW9_SAMPLING_INTERVAL.to_be_bytes());
+    packet.extend_from_slice(&4u16.to_be_bytes());
+    packet.extend_from_slice(&NFLOW9_SAMPLING_ALGORITHM.to_be_bytes());
+    packet.extend_from_slice(&1u16.to_be_bytes());
     // Padding to 32 bits
-    packet.write_u8(0).unwrap();
-    packet.write_u16::<BigEndian>(0).unwrap();
+    packet.push(0);
+    packet.extend_from_slice(&0u16.to_be_bytes());
 }
 
 fn write_option_data(packet: &mut Vec<u8>, ifidx: u16, sample_rate: u32) {
     // Flowset ID = 256, length = 4 + 4 + 4 + 1 + 3 = 16
-    packet.write_u16::<BigEndian>(NF9_SOFTFLOWD_OPTION_TEMPLATE_ID).unwrap();
-    packet.write_u16::<BigEndian>(16).unwrap();
-    packet.write_u32::<BigEndian>(ifidx as u32).unwrap();
-    packet.write_u32::<BigEndian>(sample_rate).unwrap();
-    packet.write_u8(1).unwrap(); // Sampling algorithm: Systematic count-based
-    packet.write_u8(0).unwrap(); // Pad
-    packet.write_u8(0).unwrap(); // Pad
-    packet.write_u8(0).unwrap(); // Pad
+    packet.extend_from_slice(&NF9_SOFTFLOWD_OPTION_TEMPLATE_ID.to_be_bytes());
+    packet.extend_from_slice(&16u16.to_be_bytes());
+    packet.extend_from_slice(&ifidx.to_be_bytes());
+    packet.extend_from_slice(&sample_rate.to_be_bytes());
+    packet.push(1); // Sampling algorithm: Systematic count-based
+    packet.push(0); // Pad
+    packet.push(0); // Pad
+    packet.push(0); // Pad
 }
 
 pub fn send_netflow_v9(sp: SendParameter) -> i32 {
@@ -142,40 +142,41 @@ pub fn send_netflow_v9(sp: SendParameter) -> i32 {
     let ifidx = sp.ifidx;
 
     // Check if we need to send templates (periodically)
-    let mut send_templates_now = false;
-    unsafe {
-        if PKTS_UNTIL_TEMPLATE <= 0 {
-            send_templates_now = true;
-            PKTS_UNTIL_TEMPLATE = 16;
-        }
-        PKTS_UNTIL_TEMPLATE -= 1;
+let mut send_templates_now = false;
+unsafe {
+    if PKTS_UNTIL_TEMPLATE <= 0 {
+        send_templates_now = true;
+        PKTS_UNTIL_TEMPLATE = 16;
+    }
+    PKTS_UNTIL_TEMPLATE -= 1;
+}
+
+if send_templates_now {
+    // Send a dedicated packet with templates and options data
+    packet.clear();
+    packet.extend_from_slice(&9u16.to_be_bytes()); // Version
+    packet.extend_from_slice(&0u16.to_be_bytes()); // Flowset count (will fill)
+    packet.extend_from_slice(&uptime_ms.to_be_bytes());
+    packet.extend_from_slice(&(now.tv_sec as u32).to_be_bytes());
+    packet.extend_from_slice(&(sp.param.packets_sent as u32).to_be_bytes()); // Package seq
+    packet.extend_from_slice(&0u32.to_be_bytes()); // Source ID
+
+    write_templates(&mut packet);
+    if sp.param.sample_rate > 0 {
+        write_option_data(&mut packet, ifidx, sp.param.sample_rate);
     }
 
-    if send_templates_now {
-        // Send a dedicated packet with templates and options data
-        packet.clear();
-        packet.write_u16::<BigEndian>(9).unwrap(); // Version
-        packet.write_u16::<BigEndian>(0).unwrap(); // Flowset count (will fill)
-        packet.write_u32::<BigEndian>(uptime_ms).unwrap();
-        packet.write_u32::<BigEndian>(now.tv_sec as u32).unwrap();
-        packet.write_u32::<BigEndian>(sp.param.packets_sent as u32).unwrap(); // Package seq
-        packet.write_u32::<BigEndian>(0).unwrap(); // Source ID
+    // Set flowset count to 3 (or 4 if sample rate > 0)
+    let num_sets = if sp.param.sample_rate > 0 { 4u16 } else { 3u16 };
+    let count_bytes = num_sets.to_be_bytes();
+    packet[2] = count_bytes[0];
+    packet[3] = count_bytes[1];
 
-        write_templates(&mut packet);
-        if sp.param.sample_rate > 0 {
-            write_option_data(&mut packet, ifidx, sp.param.sample_rate);
-        }
-
-        // Set flowset count to 3 (or 4 if sample rate > 0)
-        let num_sets = if sp.param.sample_rate > 0 { 4 } else { 3 };
-        packet[2] = (num_sets >> 8) as u8;
-        packet[3] = (num_sets & 0xFF) as u8;
-
-        let mut sent = 0;
-        let _ = sp.target.send_multi_destinations(&packet, &mut sent);
-        sp.param.packets_sent += 1;
-        packet.clear();
-    }
+    let mut sent = 0;
+    let _ = sp.target.send_multi_destinations(&packet, &mut sent);
+    sp.param.packets_sent += 1;
+    packet.clear();
+}
 
     for flow in target_flows {
         let is_v6 = flow.key.af == 10;
@@ -206,34 +207,36 @@ pub fn send_netflow_v9(sp: SendParameter) -> i32 {
             }
 
             if packet.is_empty() {
-                packet.write_u16::<BigEndian>(9).unwrap(); // Version
+                packet.extend_from_slice(&9u16.to_be_bytes()); // Version
                 offset_to_flow_count = packet.len();
-                packet.write_u16::<BigEndian>(0).unwrap(); // Flowset count
-                packet.write_u32::<BigEndian>(uptime_ms).unwrap();
-                packet.write_u32::<BigEndian>(now.tv_sec as u32).unwrap();
-                packet.write_u32::<BigEndian>(sp.param.packets_sent as u32).unwrap();
-                packet.write_u32::<BigEndian>(0).unwrap(); // Source ID
+                packet.extend_from_slice(&0u16.to_be_bytes()); // Flowset count
+                packet.extend_from_slice(&uptime_ms.to_be_bytes());
+                packet.extend_from_slice(&(now.tv_sec as u32).to_be_bytes());
+                packet.extend_from_slice(&(sp.param.packets_sent as u32).to_be_bytes());
+                packet.extend_from_slice(&0u32.to_be_bytes()); // Source ID
             }
 
             if current_template_id != flow_template_id {
                 if current_template_id != 0 {
                     // Close previous flowset
                     let flowset_len = (packet.len() - flowset_start_offset) as u16;
-                    packet[offset_to_flowset_len] = (flowset_len >> 8) as u8;
-                    packet[offset_to_flowset_len + 1] = (flowset_len & 0xFF) as u8;
+                    let len_bytes = flowset_len.to_be_bytes();
+                    packet[offset_to_flowset_len] = len_bytes[0];
+                    packet[offset_to_flowset_len + 1] = len_bytes[1];
                 }
 
                 // Start new flowset
                 flowset_start_offset = packet.len();
-                packet.write_u16::<BigEndian>(flow_template_id).unwrap();
+                packet.extend_from_slice(&flow_template_id.to_be_bytes());
                 offset_to_flowset_len = packet.len();
-                packet.write_u16::<BigEndian>(0).unwrap(); // Flowset length (fill in later)
+                packet.extend_from_slice(&0u16.to_be_bytes()); // Flowset length (fill in later)
 
                 current_template_id = flow_template_id;
                 // Increment flowset count in header
-                let flowset_count = BigEndian::read_u16(&packet[offset_to_flow_count..offset_to_flow_count + 2]) + 1;
-                packet[offset_to_flow_count] = (flowset_count >> 8) as u8;
-                packet[offset_to_flow_count + 1] = (flowset_count & 0xFF) as u8;
+                let count_val = u16::from_be_bytes([packet[offset_to_flow_count], packet[offset_to_flow_count + 1]]) + 1;
+                let count_bytes = count_val.to_be_bytes();
+                packet[offset_to_flow_count] = count_bytes[0];
+                packet[offset_to_flow_count + 1] = count_bytes[1];
             }
 
             // Write Flow Data
@@ -247,8 +250,8 @@ pub fn send_netflow_v9(sp: SendParameter) -> i32 {
                     std::net::IpAddr::V6(ip) => ip.octets(),
                     _ => [0; 16],
                 };
-                packet.write_all(&src_bytes).unwrap();
-                packet.write_all(&dst_bytes).unwrap();
+                packet.extend_from_slice(&src_bytes);
+                packet.extend_from_slice(&dst_bytes);
             } else {
                 let src_ip = match flow.key.addr[dir] {
                     std::net::IpAddr::V4(ip) => u32::from(ip),
@@ -258,40 +261,41 @@ pub fn send_netflow_v9(sp: SendParameter) -> i32 {
                     std::net::IpAddr::V4(ip) => u32::from(ip),
                     _ => 0,
                 };
-                packet.write_u32::<BigEndian>(src_ip).unwrap();
-                packet.write_u32::<BigEndian>(dst_ip).unwrap();
+                packet.extend_from_slice(&src_ip.to_be_bytes());
+                packet.extend_from_slice(&dst_ip.to_be_bytes());
             }
 
             // Common statistics
             let flow_start_ms = flow.flow_start.sub_ms(&sp.param.system_boot_time);
             let flow_last_ms = flow.flow_last.sub_ms(&sp.param.system_boot_time);
-            packet.write_u32::<BigEndian>(flow_last_ms).unwrap();
-            packet.write_u32::<BigEndian>(flow_start_ms).unwrap();
-            packet.write_u32::<BigEndian>(flow.octets[dir]).unwrap();
-            packet.write_u32::<BigEndian>(flow.packets[dir]).unwrap();
-            packet.write_u32::<BigEndian>(ifidx as u32).unwrap();
-            packet.write_u32::<BigEndian>(ifidx as u32).unwrap();
-            packet.write_u16::<BigEndian>(flow.key.port[dir].to_be()).unwrap();
-            packet.write_u16::<BigEndian>(flow.key.port[dir ^ 1].to_be()).unwrap();
-            packet.write_u8(flow.key.protocol).unwrap();
-            packet.write_u8(flow.tcp_flags[dir]).unwrap();
-            packet.write_u8(if is_v6 { 6 } else { 4 }).unwrap();
-            packet.write_u8(flow.tos[dir]).unwrap();
-            
+            packet.extend_from_slice(&flow_last_ms.to_be_bytes());
+            packet.extend_from_slice(&flow_start_ms.to_be_bytes());
+            packet.extend_from_slice(&flow.octets[dir].to_be_bytes());
+            packet.extend_from_slice(&flow.packets[dir].to_be_bytes());
+            packet.extend_from_slice(&(ifidx as u32).to_be_bytes());
+            packet.extend_from_slice(&(ifidx as u32).to_be_bytes());
+            packet.extend_from_slice(&flow.key.port[dir].to_be_bytes());
+            packet.extend_from_slice(&flow.key.port[dir ^ 1].to_be_bytes());
+            packet.push(flow.key.protocol);
+            packet.push(flow.tcp_flags[dir]);
+            packet.push(if is_v6 { 6 } else { 4 });
+            packet.push(flow.tos[dir]);
+
             // ICMP type/code (port contains type * 256 + code in canonical endianness)
-            packet.write_u16::<BigEndian>(flow.key.port[dir ^ 1].to_be()).unwrap();
+            packet.extend_from_slice(&flow.key.port[dir ^ 1].to_be_bytes());
             // VLAN ID
-            packet.write_u16::<BigEndian>(flow.key.vlanid[dir]).unwrap();
+            packet.extend_from_slice(&flow.key.vlanid[dir].to_be_bytes());
 
             flows_in_packet += 1;
         }
     }
 
     if flows_in_packet > 0 {
-        // Close last flowset
+    // Close last flowset
         let flowset_len = (packet.len() - flowset_start_offset) as u16;
-        packet[offset_to_flowset_len] = (flowset_len >> 8) as u8;
-        packet[offset_to_flowset_len + 1] = (flowset_len & 0xFF) as u8;
+        let len_bytes = flowset_len.to_be_bytes();
+        packet[offset_to_flowset_len] = len_bytes[0];
+        packet[offset_to_flowset_len + 1] = len_bytes[1];
 
         if let Err(e) = send_packet(&mut packet, &sp, offset_to_flow_count) {
             log::error!("Failed to send netflow v9 leftovers: {}", e);

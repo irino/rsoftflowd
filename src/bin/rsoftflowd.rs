@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use clap::Parser;
 use nix::sys::signal::{self, SigAction, SigHandler, Signal};
+
 use rsoftflowd::common::{
     FlowTracker, Flow, FlowKey, TimeVal, ExpiryReason, ExpiryKey, TrackLevel
 };
@@ -66,12 +67,10 @@ fn apply_timeouts(tracker: &mut FlowTracker, timeout_specs: &[String]) {
     }
 }
 
-static mut GRACEFUL_SHUTDOWN: bool = false;
+static GRACEFUL_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 extern "C" fn sig_handler(_sig: libc::c_int) {
-    unsafe {
-        GRACEFUL_SHUTDOWN = true;
-    }
+    GRACEFUL_SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn register_signals() {
@@ -177,21 +176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Default UDP
                                 let s = UdpSocket::bind("0.0.0.0:0")?;
                                 s.connect(socket_addr)?;
-                                
+
                                 // Bind to specific device if requested (Linux only)
                                 #[cfg(target_os = "linux")]
                                 if let Some(ref send_if) = args.send_interface {
-                                    use std::os::unix::io::AsRawFd;
-                                    let device = std::ffi::CString::new(send_if.as_str())?;
-                                    let _ = unsafe {
-                                        libc::setsockopt(
-                                            s.as_raw_fd(),
-                                            libc::SOL_SOCKET,
-                                            libc::SO_BINDTODEVICE,
-                                            device.as_ptr() as *const libc::c_void,
-                                            device.as_bytes_with_nul().len() as libc::socklen_t,
-                                        )
-                                    };
+                                    if let Err(e) = rsoftflowd::net_util_unsafe::bind_socket_to_device(&s, send_if) {
+                                        log::error!("Failed to bind to interface {}: {}", send_if, e);
+                                        std::process::exit(1);
+                                    }
                                 }
 
                                 ExportSocket::Udp(s)
@@ -224,10 +216,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+    let mut control_listener = None;
     if let Some(ref path) = ctl_path {
-        if let Err(e) = start_control_server(path.clone(), cmd_tx) {
-            log::error!("Failed to start control server: {}", e);
-            std::process::exit(1);
+        match start_control_server(path.clone(), cmd_tx) {
+            Ok(listener) => control_listener = Some(listener),
+            Err(e) => {
+                log::error!("Failed to start control server: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 
@@ -254,13 +250,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let linktype = capture.get_datalink().0;
         let packet_tx_clone = packet_tx.clone();
-        
+
         thread::spawn(move || {
+            log::debug!("Packet capture thread started.");
             loop {
-                unsafe {
-                    if GRACEFUL_SHUTDOWN {
-                        break;
-                    }
+                if GRACEFUL_SHUTDOWN.load(std::sync::atomic::Ordering::SeqCst) {
+                    log::debug!("Packet capture thread shutting down.");
+                    break;
                 }
                 match capture.next_packet() {
                     Ok(raw_packet) => {
@@ -270,7 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tv_sec: raw_packet.header.ts.tv_sec as i64,
                             tv_usec: raw_packet.header.ts.tv_usec as i32,
                         };
-                        
+
                         if let Some(parsed) = parse_packet(linktype, &raw_packet.data, caplen, len, track_level, timestamp) {
                             let _ = packet_tx_clone.send(parsed);
                         }
@@ -285,6 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            log::debug!("Packet capture thread exited.");
         });
     } else if let Some(ref dev_name) = args.interface {
         let snaplen = args.capture_length.unwrap_or(256) as i32;
@@ -294,7 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .buffer_size(1024 * 1024);
         builder = builder.immediate_mode(true);
         let mut capture = builder.open()?;
-        
+
         if let Some(ref filter) = bpf_filter {
             log::info!("Applying BPF filter: \"{}\"", filter);
             capture.filter(filter, true)?;
@@ -304,10 +301,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         thread::spawn(move || {
             loop {
-                unsafe {
-                    if GRACEFUL_SHUTDOWN {
-                        break;
-                    }
+                if GRACEFUL_SHUTDOWN.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
                 }
                 match capture.next_packet() {
                     Ok(raw_packet) => {
@@ -317,7 +312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tv_sec: raw_packet.header.ts.tv_sec as i64,
                             tv_usec: raw_packet.header.ts.tv_usec as i32,
                         };
-                        
+
                         if let Some(parsed) = parse_packet(linktype, &raw_packet.data, caplen, len, track_level, timestamp) {
                             let _ = packet_tx_clone.send(parsed);
                         }
@@ -342,13 +337,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         // Handle signals
-        unsafe {
-            if GRACEFUL_SHUTDOWN {
-                log::info!("Shutting down gracefully...");
-                // Expire and flush all active flows
-                flush_all_flows(&mut tracker, &targets);
-                break;
-            }
+        if GRACEFUL_SHUTDOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            log::info!("Shutting down gracefully...");
+            // Expire and flush all active flows
+            flush_all_flows(&mut tracker, &targets);
+            break;
         }
 
         // Handle control commands
@@ -363,10 +356,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = resp.send(dump_str);
                 }
                 ControlCommand::Shutdown { resp } => {
-                    log::info!("Shutdown command received from control client.");
-                    flush_all_flows(&mut tracker, &targets);
+                    log::info!("Shutdown command received.");
+                    GRACEFUL_SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
                     let _ = resp.send("softflowd: Shutting down gracefully...\n".to_string());
-                    std::process::exit(0);
                 }
                 ControlCommand::ExpireAll { resp } => {
                     let count = expire_all_flows(&mut tracker, &targets);
@@ -437,8 +429,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // In offline PCAP file mode, if the packet channel is empty and thread has finished, we exit!
-        if pcap_file_mode && channel_disconnected {
-            log::info!("PCAP file playback finished. Processing remaining flows.");
+        if (pcap_file_mode && channel_disconnected) || GRACEFUL_SHUTDOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            log::info!("Shutting down. Processing remaining flows.");
             flush_all_flows(&mut tracker, &targets);
             // Print stats to stdout before exit as C softflowd does
             let final_stats = render_statistics(&tracker);
@@ -446,6 +438,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
     }
+
+    log::info!("Shutting down complete, exiting.");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+
+    // Close control socket listener first, then remove file
+    drop(control_listener);
 
     // Cleanup UNIX socket file and PID file
     if let Some(ref path) = ctl_path {
@@ -455,7 +455,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::remove_file(path);
     }
 
-    Ok(())
+    std::process::exit(0);
 }
 
 fn process_parsed_packet(tracker: &mut FlowTracker, parsed: ParsedPacket) {
@@ -631,7 +631,7 @@ fn accumulate_stats(tracker: &mut FlowTracker, flow: &Flow) {
 
     let n = tracker.param.flows_expired as f64;
     tracker.param.duration.update(duration_sec, n);
-    
+
     let proto_n = tracker.param.flows_pp[flow.key.protocol as usize % 256] as f64;
     tracker.param.duration_pp[flow.key.protocol as usize % 256].update(duration_sec, proto_n);
 

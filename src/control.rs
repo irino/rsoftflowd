@@ -20,14 +20,15 @@ pub enum ControlCommand {
 pub fn start_control_server(
     path: String,
     cmd_tx: Sender<ControlCommand>,
-) -> std::io::Result<()> {
+) -> std::io::Result<UnixListener> {
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
 
+    let listener_for_thread = listener.try_clone()?;
     thread::spawn(move || {
-        for stream in listener.incoming() {
+        for stream in listener_for_thread.incoming() {
             match stream {
-                Ok(mut stream) => {
+                Ok(stream) => {
                     let cmd_tx = cmd_tx.clone();
                     thread::spawn(move || {
                         use std::io::{BufRead, BufReader, Write};
@@ -49,13 +50,13 @@ pub fn start_control_server(
                                 "stop-gather" => ControlCommand::StopGather { resp: tx },
                                 "send-template" => ControlCommand::SendTemplate { resp: tx },
                                 _ => {
-                                    let _ = stream.write_all(format!("Unknown control command \"{}\"\n", cmd_str).as_bytes());
+                                    let _ = (&stream).write_all(format!("Unknown control command \"{}\"\n", cmd_str).as_bytes());
                                     return;
                                 }
                             };
                             if cmd_tx.send(cmd).is_ok() {
                                 if let Ok(resp_str) = rx.recv() {
-                                    let _ = stream.write_all(resp_str.as_bytes());
+                                    let _ = (&stream).write_all(resp_str.as_bytes());
                                 }
                             }
                         }
@@ -63,12 +64,13 @@ pub fn start_control_server(
                 }
                 Err(e) => {
                     log::error!("Control server accept error: {}", e);
+                    break;
                 }
             }
         }
     });
 
-    Ok(())
+    Ok(listener)
 }
 
 fn format_time(t: i64) -> String {
