@@ -1,4 +1,25 @@
 #!/usr/bin/env python3
+"""
+Integration test suite for rsoftflowd compatibility.
+
+This module provides an automated environment to verify compatibility between
+the Rust-ported rsoftflowd and the original softflowd implementation.
+It uses pcap samples, nfcapd, and nfdump to compare exported flow records
+across different NetFlow/IPFIX versions.
+
+Usage:
+    python3 tests/run_compat_tests.py [OPTIONS]
+
+Options:
+    -i, --ignore-timestamp  : Ignore 'firstSeen' and 'duration' fields when comparing nfdump output between softflowd (C) and rsoftflowd (Rust).
+    -6  --ignore-ipv6       : Ignore IPv6 tests.
+
+This script manages the lifecycle of daemon processes, performs flow export
+validation using nfcapd/nfdump, and handles temporary resource cleanup.
+"""
+
+import argparse
+import atexit
 import os
 import shutil
 import signal
@@ -8,15 +29,36 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from typing import List, Tuple
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-C_DIR = os.path.join(BASE_DIR, "reference", "softflowd")
-C_DAEMON = os.path.join(C_DIR, "softflowd")
-C_CTL = os.path.join(C_DIR, "softflowctl")
 RUST_DAEMON = os.path.join(BASE_DIR, "target", "debug", "rsoftflowd")
 RUST_CTL = os.path.join(BASE_DIR, "target", "debug", "rsoftflowctl")
+TMP_DIR = tempfile.mkdtemp(prefix="rsoftflowd_test_")
+atexit.register(shutil.rmtree, TMP_DIR)
+HTTP_PCAP_URL = (
+    "https://wiki.wireshark.org/uploads/27707187aeb30df68e70c8fb9d614981/http.cap"
+)
+V6_HTTP_PCAP_URL = "https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/v6-http.cap"
+
+
+def ensure_sample_pcap(name, url):
+    """
+    Downloads or retrieves a sample pcap file from a URL.
+
+    Args:
+        filename (str): Local filename to store the pcap.
+        url (str): Remote URL to download from if local file is missing.
+    Returns:
+        str: Absolute path to the pcap file.
+    """
+    path = os.path.join(TMP_DIR, name)
+    if not os.path.exists(path):
+        print(f"Downloading {name}...")
+        urllib.request.urlretrieve(url, path)
+    return path
 
 
 def print_green(text: str):
@@ -31,183 +73,77 @@ def print_yellow(text: str):
     print(f"\033[93m{text}\033[0m")
 
 
+def check_command(cmd, apt_pkg, source_url):
+    path = shutil.which(cmd)
+    if path:
+        return path
+
+    print_red(f"Error: {cmd} not found.")
+    print(f"Please install it using one of the following methods:")
+    print(f"  Ubuntu/Debian: sudo apt update && sudo apt install -y {apt_pkg}")
+    print(f"  Source: {source_url}")
+    sys.exit(1)
+
+
 def check_binaries():
-    """Ensure all binaries are compiled."""
-    print("Checking and compiling binaries if necessary...")
+    # 既存のsoftflowd/softflowctlの確認
+    C_DAEMON = check_command(
+        "softflowd", "softflowd", "https://github.com/irino/softflowd"
+    )
+    C_CTL = check_command(
+        "softflowctl", "softflowd", "https://github.com/irino/softflowd"
+    )
 
-    # Compile Rust binaries
-    subprocess.run(["cargo", "build"], cwd=BASE_DIR, check=True)
+    # check nfdump/nfcapd command
+    NFDUMP = check_command("nfdump", "nfdump", "https://github.com/phaag/nfdump")
+    NFCAPD = check_command("nfcapd", "nfdump", "https://github.com/phaag/nfdump")
 
-    # Compile C binaries
-    if not os.path.exists(C_DAEMON) or not os.path.exists(C_CTL):
-        print("Compiling reference C binaries...")
-        # Create minimal config.h if missing
-        config_h = os.path.join(C_DIR, "config.h")
-        if not os.path.exists(config_h):
-            with open(config_h, "w") as f:
-                f.write(
-                    "#ifndef CONFIG_H\n#define CONFIG_H\n#define HAVE_PCAP_H 1\n#define HAVE_ENDIAN_H 1\n#define FLOW_RB 1\n#define EXPIRY_RB 1\n#define _GNU_SOURCE 1\n#define _BSD_SOURCE 1\n#endif\n"
-                )
+    return C_DAEMON, C_CTL, NFDUMP, NFCAPD
 
-        # Compile softflowd
-        subprocess.run(
-            [
-                "gcc",
-                "-o",
-                "softflowd",
-                "freelist.c",
-                "softflowd.c",
-                "log.c",
-                "netflow5.c",
-                "ipfix.c",
-                "psamp.c",
-                "netflow9.c",
-                "netflow1.c",
-                "convtime.c",
-                "strlcpy.c",
-                "strlcat.c",
-                "closefrom.c",
-                "daemon.c",
-                "-lpcap",
-            ],
-            cwd=C_DIR,
-            check=True,
+
+def run_nfdump_test(pcap_path, daemon_bin, version, is_v6):
+    """
+    Executes a daemon, processes a pcap file, and compares nfdump CSV output.
+
+    Args:
+        pcap_path (str): Path to the input pcap file.
+        daemon_bin (str): Path to the daemon binary (softflowd or rsoftflowd).
+        version (int): NetFlow/IPFIX version to test.
+        is_v6 (bool): Flag indicating if the pcap contains IPv6 traffic.
+    Returns:
+        str: CSV formatted output from nfdump.
+    """
+    keep_tmp = os.getenv("KEEP_TMP") == "1"  # jadge by environment variables
+    out_dir = tempfile.mkdtemp()
+    port = 2055
+    nfcapd_proc = subprocess.Popen(["nfcapd", "-p", str(port), "-w", out_dir])
+    try:
+        # デーモンの起動
+        cmd = [
+            daemon_bin,
+            "-d",
+            "-r",
+            pcap_path,
+            "-n",
+            f"127.0.0.1:{port}",
+            "-v",
+            str(version),
+        ]
+        proc = subprocess.Popen(cmd)
+        proc.wait()
+        nfcapd_proc.terminate()
+        nfcapd_proc.wait()
+        # csv output by nfdump
+        result = subprocess.run(
+            ["nfdump", "-R", out_dir, "-o", "csv"], capture_output=True, text=True
         )
-        # Compile softflowctl
-        subprocess.run(
-            [
-                "gcc",
-                "-o",
-                "softflowctl",
-                "softflowctl.c",
-                "convtime.c",
-                "strlcpy.c",
-                "strlcat.c",
-                "closefrom.c",
-                "daemon.c",
-            ],
-            cwd=C_DIR,
-            check=True,
-        )
-
-    # Verify paths exist
-    for path, name in [
-        (C_DAEMON, "C daemon"),
-        (C_CTL, "C control"),
-        (RUST_DAEMON, "Rust daemon"),
-        (RUST_CTL, "Rust control"),
-    ]:
-        if not os.path.exists(path):
-            print_red(f"Error: {name} not found at {path}")
-            sys.exit(1)
-    print_green("All binaries are ready.")
+        return result.stdout
+    finally:
+        if not keep_tmp:
+            shutil.rmtree(out_dir)
 
 
-def create_dummy_pcap(filepath: str):
-    """Generate a pcap containing dummy TCP, UDP, and ICMP packets."""
-    # PCAP Global Header
-    global_hdr = struct.pack(
-        ">IHHIIII",
-        0xA1B2C3D4,  # magic
-        2,
-        4,  # version major, minor
-        0,  # thiszone
-        0,  # sigfigs
-        65535,  # snaplen
-        1,  # network (DLT_EN10MB)
-    )
-
-    packets = []
-
-    # 1. TCP SYN from 192.168.1.100:12345 -> 10.0.0.1:80
-    eth_hdr = struct.pack(
-        "!6s6sH", b"\x02\x02\x02\x02\x02\x02", b"\x01\x01\x01\x01\x01\x01", 0x0800
-    )
-    ip_hdr = struct.pack(
-        "!BBHHHBBH4s4s",
-        0x45,
-        0,
-        40,
-        0x1234,
-        0,
-        64,
-        6,
-        0,
-        socket.inet_aton("192.168.1.100"),
-        socket.inet_aton("10.0.0.1"),
-    )
-    tcp_hdr = struct.pack(
-        "!HHIIBBHHH", 12345, 80, 1000, 0, 0x50, 0x02, 65535, 0, 0
-    )  # SYN
-    packets.append(eth_hdr + ip_hdr + tcp_hdr)
-
-    # 2. TCP ACK from 10.0.0.1:80 -> 192.168.1.100:12345
-    ip_hdr_rev = struct.pack(
-        "!BBHHHBBH4s4s",
-        0x45,
-        0,
-        40,
-        0x1235,
-        0,
-        64,
-        6,
-        0,
-        socket.inet_aton("10.0.0.1"),
-        socket.inet_aton("192.168.1.100"),
-    )
-    tcp_hdr_rev = struct.pack(
-        "!HHIIBBHHH", 80, 12345, 1, 1001, 0x50, 0x10, 65535, 0, 0
-    )  # ACK
-    packets.append(eth_hdr + ip_hdr_rev + tcp_hdr_rev)
-
-    # 3. UDP from 192.168.1.100:5555 -> 8.8.8.8:53 (length 30)
-    ip_hdr_udp = struct.pack(
-        "!BBHHHBBH4s4s",
-        0x45,
-        0,
-        38,
-        0x1236,
-        0,
-        64,
-        17,
-        0,
-        socket.inet_aton("192.168.1.100"),
-        socket.inet_aton("8.8.8.8"),
-    )
-    udp_hdr = struct.pack("!HHHH", 5555, 53, 18, 0)
-    packets.append(eth_hdr + ip_hdr_udp + udp_hdr + b"Hello UDP!")
-
-    # 4. ICMP Echo Request from 192.168.1.100 -> 192.168.1.1 (length 40)
-    ip_hdr_icmp = struct.pack(
-        "!BBHHHBBH4s4s",
-        0x45,
-        0,
-        28,
-        0x1237,
-        0,
-        64,
-        1,
-        0,
-        socket.inet_aton("192.168.1.100"),
-        socket.inet_aton("192.168.1.1"),
-    )
-    icmp_hdr = struct.pack("!BBHH", 8, 0, 0, 0x5678)  # Type 8: Echo Request
-    packets.append(eth_hdr + ip_hdr_icmp + icmp_hdr + b"Ping!")
-
-    with open(filepath, "wb") as f:
-        f.write(global_hdr)
-        ts_sec = 1600000000
-        ts_usec = 1000
-        for pkt in packets:
-            # Packet Header
-            pkt_hdr = struct.pack(">IIII", ts_sec, ts_usec, len(pkt), len(pkt))
-            f.write(pkt_hdr)
-            f.write(pkt)
-            ts_sec += 1
-            ts_usec += 500
-
-
-def test_cli_compatibility():
+def test_cli_compatibility(C_DAEMON, RUST_DAEMON):
     print("--------------------------------------------------")
     print("Testing 1: CLI Options Compatibility...")
     print("--------------------------------------------------")
@@ -258,6 +194,10 @@ def test_cli_compatibility():
 def start_blocked_daemon(
     daemon_bin: str, sock_path: str, extra_args: list = None
 ) -> Tuple[subprocess.Popen, int, str, str]:
+    """
+    Manages the lifecycle of a daemon process connected via a blocked PCAP FIFO.
+    Used for testing control socket connectivity without live interface traffic.
+    """
     fifo_dir = tempfile.mkdtemp()
     fifo_path = os.path.join(fifo_dir, "pcap.fifo")
     os.mkfifo(fifo_path)
@@ -281,6 +221,10 @@ def start_blocked_daemon(
 def stop_blocked_daemon(
     proc: subprocess.Popen, fifo_fd: int, fifo_path: str, fifo_dir: str
 ):
+    """
+    Manages the lifecycle of a daemon process connected via a blocked PCAP FIFO.
+    Used for testing control socket connectivity without live interface traffic.
+    """
     try:
         proc.terminate()
 
@@ -303,13 +247,13 @@ def stop_blocked_daemon(
             os.rmdir(fifo_dir)
 
 
-def run_cross_control_tests():
+def run_cross_control_tests(C_DAEMON, C_CTL, RUST_DAEMON, RUST_CTL):
     print("--------------------------------------------------")
     print("Testing 2: Control Socket Cross-Connection...")
     print("--------------------------------------------------")
 
-    sock_c = "/tmp/compat_test_c.sock"
-    sock_rust = "/tmp/compat_test_rust.sock"
+    sock_c = os.path.join(TMP_DIR, "compat_test_c.sock")
+    sock_rust = os.path.join(TMP_DIR, "compat_test_rust.sock")
 
     for sock in (sock_c, sock_rust):
         if os.path.exists(sock):
@@ -409,232 +353,115 @@ def run_cross_control_tests():
     print_green("Control socket cross-connection tests PASSED.")
 
 
-def receive_packets(port: int, timeout: float = 1.0) -> List[bytes]:
-    """Bind a UDP socket and receive all incoming packets until timeout."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", port))
-    sock.settimeout(timeout)
-    packets = []
-    try:
-        while True:
-            data, addr = sock.recvfrom(65535)
-            packets.append(data)
-    except socket.timeout:
-        pass
-    finally:
-        sock.close()
-    return packets
+def strip_columns(line, n):
+    parts = line.split(",", n)
+    return parts[n] if len(parts) > n else ""
 
 
-def parse_netflow_v5(data: bytes) -> List[dict]:
-    """Parse NetFlow v5 packets and return flow records."""
-    if len(data) < 24:
-        return []
-    version, count = struct.unpack("!HH", data[0:4])
-    if version != 5:
-        return []
+def test_differential_packets(
+    C_DAEMON, RUST_DAEMON, ignore_ipv6=False, ignore_timestamp=False
+):
+    """
+    Validates that rsoftflowd generates identical flow records as softflowd.
 
-    flows = []
-    offset = 24
-    for _ in range(count):
-        if offset + 48 > len(data):
-            break
-        rec = data[offset : offset + 48]
-        (
-            src,
-            dst,
-            nexthop,
-            input_if,
-            output_if,
-            pkts,
-            octets,
-            first,
-            last,
-            src_port,
-            dst_port,
-            tcp_flags,
-            prot,
-            tos,
-            src_as,
-            dst_as,
-            src_mask,
-            dst_mask,
-        ) = struct.unpack("!4s4s4sHHIIIIHHxBBBHHBBxx", rec)
-        flows.append(
-            {
-                "src": socket.inet_ntoa(src),
-                "dst": socket.inet_ntoa(dst),
-                "pkts": pkts,
-                "octets": octets,
-                "src_port": src_port,
-                "dst_port": dst_port,
-                "tcp_flags": tcp_flags,
-                "protocol": prot,
-                "tos": tos,
-            }
-        )
-        offset += 48
-    return flows
-
-
-def test_differential_packets():
+    Iterates through configured test cases (IPv4/IPv6), runs both daemons,
+    exports flows to nfcapd, and performs a differential analysis using nfdump.
+    """
     print("--------------------------------------------------")
-    print("Testing 3: Differential Packet Output Verification...")
+    print("Testing 3: Differential Packet Output Verification (via nfdump)...")
     print("--------------------------------------------------")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        pcap_path = os.path.join(tmpdir, "test.pcap")
-        create_dummy_pcap(pcap_path)
+    test_cases = [
+        {
+            "name": "IPv4 HTTP",
+            "url": HTTP_PCAP_URL,
+            "filename": "http.cap",
+            "is_v6": False,
+        },
+        {
+            "name": "IPv6 HTTP",
+            "url": V6_HTTP_PCAP_URL,
+            "filename": "http_v6.cap",
+            "is_v6": True,
+        },
+    ]
 
-        # Test versions: Netflow v5, Netflow v9, IPFIX (10)
-        for version in [5, 9, 10]:
-            print(f"Verifying NetFlow version {version}...")
-            c_port = 9991
-            rust_port = 9992
+    for case in test_cases:
+        if ignore_ipv6 and case["is_v6"]:
+            continue
+        print(f"Running test case: {case['name']}")
+        pcap_path = ensure_sample_pcap(case["filename"], case["url"])
 
-            # Start collectors (listening UDP)
-            # Since softflowd in offline mode executes immediately and exits,
-            # we run python receiver sockets in background threads, or simple sequential runs.
-            # To avoid threading issues, we run them sequentially:
-            # First, we bind UDP socket, then launch daemon, then receive.
+        versions = [1, 5, 9, 10] if not case["is_v6"] else [9, 10]
 
-            # 1. Capture C output
-            # C daemon execution
-            c_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            c_sock.bind(("127.0.0.1", c_port))
-            c_sock.settimeout(1.0)
+        for version in versions:
+            print(f"  Verifying NetFlow version: {version}")
 
-            # Run C softflowd
-            # Note: C version uses -a option (adjust time) when reading pcap so it exports flows
-            c_proc = subprocess.Popen(
+            c_output = run_nfdump_test(pcap_path, C_DAEMON, version, case["is_v6"])
+            r_output = run_nfdump_test(pcap_path, RUST_DAEMON, version, case["is_v6"])
+
+            # Simple line-by-line comparison ignoring timestamp differences or header noise
+            c_lines = sorted(
                 [
-                    C_DAEMON,
-                    "-d",
-                    "-r",
-                    pcap_path,
-                    "-n",
-                    f"127.0.0.1:{c_port}",
-                    "-v",
-                    str(version),
-                    "-a",
+                    (strip_columns(line, 2) if ignore_timestamp else line)
+                    for line in c_output.splitlines()
+                    if not line.startswith("firstSeen") and line.strip()
+                    # ...
                 ]
             )
-            c_proc.wait()
 
-            c_packets = []
-            try:
-                while True:
-                    data, _ = c_sock.recvfrom(65535)
-                    c_packets.append(data)
-            except socket.timeout:
-                pass
-            finally:
-                c_sock.close()
-
-            # 2. Capture Rust output
-            rust_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            rust_sock.bind(("127.0.0.1", rust_port))
-            rust_sock.settimeout(1.0)
-
-            # Run Rust rsoftflowd (note: Rust rsoftflowd automatically adjusts times for PCAP reading)
-            rust_proc = subprocess.Popen(
+            r_lines = sorted(
                 [
-                    RUST_DAEMON,
-                    "-d",
-                    "-r",
-                    pcap_path,
-                    "-n",
-                    f"127.0.0.1:{rust_port}",
-                    "-v",
-                    str(version),
+                    (line.split(",", 2)[2] if ignore_timestamp else line)
+                    for line in r_output.splitlines()
+                    if not line.startswith("firstSeen") and line.strip()
                 ]
             )
-            rust_proc.wait()
 
-            rust_packets = []
-            try:
-                while True:
-                    data, _ = rust_sock.recvfrom(65535)
-                    rust_packets.append(data)
-            except socket.timeout:
-                pass
-            finally:
-                rust_sock.close()
+            if c_lines != r_lines:
+                print_red(f"FAILED: Output mismatch for version {version}")
+                # Print diff for debugging
+                import difflib
 
-            print(
-                f"  Captured {len(c_packets)} packets from C, {len(rust_packets)} packets from Rust"
-            )
-            if not c_packets or not rust_packets:
-                print_red(
-                    f"FAILED: No packets captured for version {version}. C: {len(c_packets)}, Rust: {len(rust_packets)}"
+                diff = difflib.unified_diff(
+                    c_lines, r_lines, fromfile="C", tofile="Rust"
                 )
+                for line in diff:
+                    print(line)
                 sys.exit(1)
 
-            if version == 5:
-                # For v5, do deep semantic flow record comparison
-                c_flows = []
-                for p in c_packets:
-                    c_flows.extend(parse_netflow_v5(p))
-                rust_flows = []
-                for p in rust_packets:
-                    rust_flows.extend(parse_netflow_v5(p))
+            print_green(f"  Version {version} matched.")
+            """
+            print(f"  [DEBUG] Matched content for version {version}:")
+            for line in c_lines:
+                print(f"    {line}")
+            """
+    print_green("Differential packet output verification PASSED.")
 
-                # Normalize and sort flows for order-independent comparison
-                def key_func(f):
-                    return (
-                        f["src"],
-                        f["dst"],
-                        f["src_port"],
-                        f["dst_port"],
-                        f["protocol"],
-                    )
 
-                c_flows.sort(key=key_func)
-                rust_flows.sort(key=key_func)
-
-                if len(c_flows) != len(rust_flows):
-                    print_red(
-                        f"FAILED: Number of parsed flows differs. C: {len(c_flows)}, Rust: {len(rust_flows)}"
-                    )
-                    print(f"C flows: {c_flows}")
-                    print(f"Rust flows: {rust_flows}")
-                    sys.exit(1)
-
-                for i, (cf, rf) in enumerate(zip(c_flows, rust_flows)):
-                    # Compare essential fields
-                    for k in [
-                        "src",
-                        "dst",
-                        "src_port",
-                        "dst_port",
-                        "protocol",
-                        "tcp_flags",
-                    ]:
-                        if cf[k] != rf[k]:
-                            print_red(
-                                f"FAILED: Flow record mismatch at index {i}, field '{k}': C={cf[k]}, Rust={rf[k]}"
-                            )
-                            print(f"C flow: {cf}")
-                            print(f"Rust flow: {rf}")
-                            sys.exit(1)
-                print_green("  NetFlow v5 flows matched perfectly.")
-            else:
-                # For v9 and IPFIX (10), check header and packet structure validity
-                (v_c,) = struct.unpack("!H", c_packets[0][0:2])
-                (v_r,) = struct.unpack("!H", rust_packets[0][0:2])
-                if v_c != version or v_r != version:
-                    print_red(
-                        f"FAILED: Packet version header mismatch. Expected {version}, C got {v_c}, Rust got {v_r}"
-                    )
-                    sys.exit(1)
-                print_green(f"  NetFlow v{version} packet structure verified.")
-
-    print_green("Differential packet output tests PASSED.")
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-i",
+        "--ignore-timestamp",
+        action="store_true",
+        help="Ignore 'firstSeen' and 'duration' fields when comparing nfdump output between softflowd (C) and rsoftflowd (Rust).",
+    )
+    parser.add_argument(
+        "-6",
+        "--ignore-ipv6",
+        action="store_true",
+        help="Ignore IPv6 tests.",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    check_binaries()
-    test_cli_compatibility()
-    run_cross_control_tests()
-    test_differential_packets()
+    C_DAEMON, C_CTL, NFDUMP, NFCAPD = check_binaries()
+    args = parse_args()
+    test_cli_compatibility(C_DAEMON, RUST_DAEMON)
+    run_cross_control_tests(C_DAEMON, C_CTL, RUST_DAEMON, RUST_CTL)
+    test_differential_packets(
+        C_DAEMON, RUST_DAEMON, args.ignore_ipv6, args.ignore_timestamp
+    )
     print_green("\nALL COMPATIBILITY TESTS PASSED SUCCESSFULLY!")
